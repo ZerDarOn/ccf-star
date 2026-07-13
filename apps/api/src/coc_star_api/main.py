@@ -7,11 +7,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
-from coc_star_api.room_manager import BoardToken, RoomConnection, RoomManager, RoomMember
+from coc_star_api.room_manager import BoardToken, RoomConnection, RoomManager, RoomMember, RoomScene
 from coc_star_api.board_repository import BoardTokenRepository
 from coc_star_api.account_auth import AccountClaims, AccountTokenService, InvalidAccountToken
 from coc_star_api.database import engine, initialize_database, session_factory
+from coc_star_api.dice_roller import InvalidDiceExpression, roll_dice
 from coc_star_api.room_repository import RoomRepository
+from coc_star_api.scene_repository import SceneRepository
 from coc_star_api.user_repository import UserRepository
 from coc_star_api.passwords import PasswordHasher
 from coc_star_api.session_auth import InvalidSessionToken, SessionClaims, SessionTokenService
@@ -28,6 +30,7 @@ app.add_middleware(
 room_manager = RoomManager()
 board_repository = BoardTokenRepository()
 room_repository = RoomRepository()
+scene_repository = SceneRepository()
 user_repository = UserRepository()
 logger = logging.getLogger("coc-star.room")
 session_tokens = SessionTokenService(settings.session_secret)
@@ -66,6 +69,15 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(min_length=20)
 
 
+class SceneRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    background_url: str = Field(default="", max_length=2_048, pattern=r"^$|^https?://")
+
+
+class SceneActivationRequest(BaseModel):
+    scene_id: str = Field(min_length=1, max_length=128)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     await initialize_database()
@@ -74,6 +86,12 @@ async def startup() -> None:
             await room_repository.create_room(session, "demo-room", "演示房间")
         for room_id in await room_repository.list_room_ids(session):
             room_manager.create_room(room_id)
+            scenes = await scene_repository.list_by_room(session, room_id)
+            if not scenes:
+                await scene_repository.create(session, f"{room_id}-default", room_id, "默认场景", "")
+                scenes = await scene_repository.list_by_room(session, room_id)
+            active_scene = next((scene for scene in scenes if scene.is_active), scenes[0])
+            room_manager.set_scenes(room_id, [scene_from_model(scene) for scene in scenes], active_scene.scene_id)
     logger.info("database_initialized")
 
 
@@ -134,10 +152,12 @@ async def create_room(request: RoomMemberRequest, authorization: str | None = He
     try:
         async with session_factory() as session:
             await room_repository.create_room_with_owner(session, room_id, room_name, member.user_id, member.display_name)
+            default_scene = await scene_repository.create(session, f"{room_id}-default", room_id, "默认场景", "")
     except SQLAlchemyError:
         logger.exception("room_creation_failed room_id=%s", room_id)
         raise HTTPException(status_code=503, detail="room_persistence_failed") from None
     room_manager.create_room(room_id)
+    room_manager.set_scenes(room_id, [scene_from_model(default_scene)], default_scene.scene_id)
     logger.info("room_created room_id=%s user_id=%s", room_id, member.user_id)
     return {"room_id": room_id, "access_token": session_tokens.issue(member), "member": member_payload(member)}
 
@@ -196,6 +216,7 @@ async def room_socket(websocket: WebSocket, room_id: str) -> None:
             for token in await board_repository.list_by_room(session, room_id):
                 room_manager.upsert_token(room_id, token)
     members = await room_manager.join(room_id, connection)
+    active_scene = room_manager.active_scene(room_id)
     await websocket.send_json(
         {
             "type": "room.connected",
@@ -203,6 +224,8 @@ async def room_socket(websocket: WebSocket, room_id: str) -> None:
             "self": member.to_payload(),
             "members": [room_member.to_payload() for room_member in members],
             "board": {"tokens": [token.to_payload() for token in room_manager.board_tokens(room_id)]},
+            "scenes": [scene.to_payload() for scene in room_manager.scenes(room_id)],
+            "active_scene": active_scene.to_payload() if active_scene else None,
         }
     )
 
@@ -224,6 +247,12 @@ async def room_socket(websocket: WebSocket, room_id: str) -> None:
             if payload.get("type") == "room.member.remove":
                 await handle_member_remove(websocket, room_id, member, payload)
                 continue
+            if payload.get("type") == "scene.create":
+                await handle_scene_create(websocket, room_id, member, payload)
+                continue
+            if payload.get("type") == "scene.activate":
+                await handle_scene_activate(websocket, room_id, member, payload)
+                continue
             if payload.get("type") != "chat.message":
                 await websocket.send_json({"type": "error", "code": "unsupported_event"})
                 continue
@@ -232,6 +261,31 @@ async def room_socket(websocket: WebSocket, room_id: str) -> None:
             except ValidationError:
                 await websocket.send_json({"type": "error", "code": "invalid_chat_message"})
                 logger.info("chat_message_rejected room_id=%s user_id=%s", room_id, user_id)
+                continue
+            dice_expression = parse_dice_command(message.text)
+            if dice_expression is not None:
+                try:
+                    result = roll_dice(dice_expression)
+                except InvalidDiceExpression:
+                    await websocket.send_json({"type": "error", "code": "invalid_dice_expression"})
+                    logger.info("dice_roll_rejected room_id=%s user_id=%s expression=%s", room_id, user_id, dice_expression)
+                    continue
+                await room_manager.broadcast(
+                    room_id,
+                    {
+                        "type": "dice.result",
+                        "result": {
+                            "roll_id": str(uuid4()),
+                            "user_id": member.user_id,
+                            "display_name": member.display_name,
+                            "expression": result.expression,
+                            "rolls": list(result.rolls),
+                            "modifier": result.modifier,
+                            "total": result.total,
+                        },
+                    },
+                )
+                logger.info("dice_roll_broadcast room_id=%s user_id=%s expression=%s total=%s", room_id, user_id, result.expression, result.total)
                 continue
             await room_manager.broadcast(
                 room_id,
@@ -260,6 +314,22 @@ def member_payload(member: SessionClaims) -> dict[str, str]:
         "display_name": member.display_name,
         "role": member.role,
     }
+
+
+def scene_from_model(scene: object) -> RoomScene:
+    return RoomScene(
+        scene_id=scene.scene_id,
+        name=scene.name,
+        background_url=scene.background_url,
+        is_active=scene.is_active,
+    )
+
+
+def parse_dice_command(text: str) -> str | None:
+    command, separator, expression = text.strip().partition(" ")
+    if command.lower() not in {"/r", "/roll"}:
+        return None
+    return expression.strip() if separator else ""
 
 
 def require_account(authorization: str | None) -> AccountClaims:
@@ -407,3 +477,70 @@ async def handle_member_remove(
     await target.websocket.close(code=1008)
     await room_manager.broadcast(room_id, {"type": "member.removed", "user_id": user_id})
     logger.info("member_removed room_id=%s user_id=%s actor_user_id=%s", room_id, user_id, actor.user_id)
+
+
+async def handle_scene_create(
+    websocket: WebSocket,
+    room_id: str,
+    actor: RoomMember,
+    payload: dict[str, object],
+) -> None:
+    if actor.role != "gm":
+        await websocket.send_json({"type": "error", "code": "scene_management_forbidden"})
+        return
+    try:
+        request = SceneRequest.model_validate(payload)
+    except ValidationError:
+        await websocket.send_json({"type": "error", "code": "invalid_scene"})
+        return
+    try:
+        async with session_factory() as session:
+            scene_model = await scene_repository.create(
+                session,
+                str(uuid4()),
+                room_id,
+                request.name.strip(),
+                request.background_url,
+            )
+    except SQLAlchemyError:
+        logger.exception("scene_creation_failed room_id=%s user_id=%s", room_id, actor.user_id)
+        await websocket.send_json({"type": "error", "code": "scene_persistence_failed"})
+        return
+    scene = room_manager.activate_scene(room_id, scene_model.scene_id)
+    if scene is None:
+        scene = RoomScene(scene_model.scene_id, scene_model.name, scene_model.background_url, True)
+        room_manager.upsert_scene(room_id, scene)
+    await room_manager.broadcast(room_id, {"type": "scene.updated", "scene": scene.to_payload()})
+    logger.info("scene_created room_id=%s user_id=%s scene_id=%s", room_id, actor.user_id, scene.scene_id)
+
+
+async def handle_scene_activate(
+    websocket: WebSocket,
+    room_id: str,
+    actor: RoomMember,
+    payload: dict[str, object],
+) -> None:
+    if actor.role != "gm":
+        await websocket.send_json({"type": "error", "code": "scene_management_forbidden"})
+        return
+    try:
+        request = SceneActivationRequest.model_validate(payload)
+    except ValidationError:
+        await websocket.send_json({"type": "error", "code": "invalid_scene"})
+        return
+    try:
+        async with session_factory() as session:
+            scene_model = await scene_repository.activate(session, room_id, request.scene_id)
+    except SQLAlchemyError:
+        logger.exception("scene_activation_failed room_id=%s user_id=%s scene_id=%s", room_id, actor.user_id, request.scene_id)
+        await websocket.send_json({"type": "error", "code": "scene_persistence_failed"})
+        return
+    if scene_model is None:
+        await websocket.send_json({"type": "error", "code": "scene_not_found"})
+        return
+    scene = room_manager.activate_scene(room_id, scene_model.scene_id)
+    if scene is None:
+        scene = scene_from_model(scene_model)
+        room_manager.upsert_scene(room_id, scene)
+    await room_manager.broadcast(room_id, {"type": "scene.activated", "scene": scene.to_payload()})
+    logger.info("scene_activated room_id=%s user_id=%s scene_id=%s", room_id, actor.user_id, scene.scene_id)

@@ -24,17 +24,29 @@ export interface BoardToken {
   color: string;
 }
 
+export interface RoomScene {
+  scene_id: string;
+  name: string;
+  background_url: string;
+  is_active: boolean;
+}
+
 interface RoomState {
   connectionStatus: ConnectionStatus;
   errorMessage: string | null;
   members: RoomMember[];
   messages: ChatMessage[];
   tokens: BoardToken[];
+  scenes: RoomScene[];
+  activeScene: RoomScene | null;
   roomId: string;
   self: RoomMember | null;
   setConnectionStatus: (connectionStatus: ConnectionStatus) => void;
   setRoomSnapshot: (roomId: string, self: RoomMember, members: RoomMember[]) => void;
   setBoardSnapshot: (tokens: BoardToken[]) => void;
+  setSceneSnapshot: (scenes: RoomScene[], activeScene: RoomScene | null) => void;
+  updateScene: (scene: RoomScene) => void;
+  activateScene: (scene: RoomScene) => void;
   addMember: (member: RoomMember) => void;
   updateMember: (member: RoomMember) => void;
   removeMember: (userId: string) => void;
@@ -50,11 +62,22 @@ export const useRoomStore = create<RoomState>((set) => ({
   members: [],
   messages: [],
   tokens: [],
+  scenes: [],
+  activeScene: null,
   roomId: "demo-room",
   self: null,
   setConnectionStatus: (connectionStatus) => set({ connectionStatus }),
   setRoomSnapshot: (roomId, self, members) => set({ roomId, self, members, errorMessage: null }),
   setBoardSnapshot: (tokens) => set({ tokens }),
+  setSceneSnapshot: (scenes, activeScene) => set({ scenes, activeScene }),
+  updateScene: (scene) => set((state) => ({
+    scenes: [...state.scenes.filter((current) => current.scene_id !== scene.scene_id), scene],
+    activeScene: scene.is_active ? scene : state.activeScene,
+  })),
+  activateScene: (scene) => set((state) => ({
+    scenes: state.scenes.map((current) => ({ ...current, is_active: current.scene_id === scene.scene_id })),
+    activeScene: scene,
+  })),
   addMember: (member) => set((state) => ({
     members: [...state.members.filter((current) => current.user_id !== member.user_id), member],
   })),

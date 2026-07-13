@@ -37,6 +37,17 @@ class RoomMemberModel(Base):
     joined_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class RoomSceneModel(Base):
+    __tablename__ = "room_scenes"
+
+    scene_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    room_id: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    background_url: Mapped[str] = mapped_column(String(2_048), default="")
+    is_active: Mapped[bool] = mapped_column(default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class UserModel(Base):
     __tablename__ = "users"
 

@@ -43,10 +43,28 @@ class BoardToken:
         }
 
 
+@dataclass(slots=True, frozen=True)
+class RoomScene:
+    scene_id: str
+    name: str
+    background_url: str
+    is_active: bool = False
+
+    def to_payload(self) -> dict[str, str | bool]:
+        return {
+            "scene_id": self.scene_id,
+            "name": self.name,
+            "background_url": self.background_url,
+            "is_active": self.is_active,
+        }
+
+
 class RoomManager:
     def __init__(self) -> None:
         self._rooms: dict[str, dict[str, RoomConnection]] = {}
         self._boards: dict[str, dict[str, BoardToken]] = {}
+        self._scenes: dict[str, dict[str, RoomScene]] = {}
+        self._active_scenes: dict[str, str] = {}
         self._known_rooms: set[str] = set()
 
     def create_room(self, room_id: str) -> None:
@@ -95,6 +113,33 @@ class RoomManager:
         if not board:
             self._boards.pop(room_id, None)
         return token
+
+    def set_scenes(self, room_id: str, scenes: list[RoomScene], active_scene_id: str | None) -> None:
+        self._scenes[room_id] = {scene.scene_id: scene for scene in scenes}
+        if active_scene_id is not None:
+            self._active_scenes[room_id] = active_scene_id
+
+    def scenes(self, room_id: str) -> list[RoomScene]:
+        return list(self._scenes.get(room_id, {}).values())
+
+    def active_scene(self, room_id: str) -> RoomScene | None:
+        active_scene_id = self._active_scenes.get(room_id)
+        return self._scenes.get(room_id, {}).get(active_scene_id) if active_scene_id else None
+
+    def upsert_scene(self, room_id: str, scene: RoomScene) -> None:
+        self._scenes.setdefault(room_id, {})[scene.scene_id] = scene
+        if scene.is_active:
+            self._active_scenes[room_id] = scene.scene_id
+
+    def activate_scene(self, room_id: str, scene_id: str) -> RoomScene | None:
+        scene = self._scenes.get(room_id, {}).get(scene_id)
+        if scene is None:
+            return None
+        scenes = self._scenes[room_id]
+        for current_id, current in list(scenes.items()):
+            scenes[current_id] = replace(current, is_active=current_id == scene_id)
+        self._active_scenes[room_id] = scene_id
+        return scenes[scene_id]
 
     async def join(self, room_id: str, connection: RoomConnection) -> list[RoomMember]:
         room = self._rooms.setdefault(room_id, {})

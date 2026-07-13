@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import type { DragEvent, FormEvent } from "react";
 import { AccountUser, useAuthStore } from "./authStore";
-import { BoardToken, ChatMessage, RoomMember, useRoomStore } from "./roomStore";
+import { BoardToken, ChatMessage, RoomMember, RoomScene, useRoomStore } from "./roomStore";
 
 type RoomEvent =
-  | { type: "room.connected"; room_id: string; self: RoomMember; members: RoomMember[]; board: { tokens: BoardToken[] } }
+  | { type: "room.connected"; room_id: string; self: RoomMember; members: RoomMember[]; board: { tokens: BoardToken[] }; scenes: RoomScene[]; active_scene: RoomScene | null }
   | { type: "member.joined"; member: RoomMember }
   | { type: "member.left"; user_id: string }
   | { type: "member.role.updated"; member: RoomMember }
   | { type: "member.removed"; user_id: string }
   | { type: "chat.message"; message: ChatMessage }
+  | { type: "dice.result"; result: DiceResult }
+  | { type: "scene.updated"; scene: RoomScene }
+  | { type: "scene.activated"; scene: RoomScene }
   | { type: "board.token.upserted"; token: BoardToken }
   | { type: "board.token.removed"; token_id: string }
   | { type: "error"; code: string };
@@ -28,17 +31,29 @@ interface AuthResponse {
   refresh_token: string;
 }
 
+interface DiceResult {
+  roll_id: string;
+  user_id: string;
+  display_name: string;
+  expression: string;
+  rolls: number[];
+  modifier: number;
+  total: number;
+}
+
 export function App() {
   const socketRef = useRef<WebSocket | null>(null);
   const boardRef = useRef<HTMLDivElement | null>(null);
   const [roomInput, setRoomInput] = useState("demo-room");
   const [nameInput, setNameInput] = useState("苏鸣澈");
   const [messageInput, setMessageInput] = useState("");
+  const [sceneNameInput, setSceneNameInput] = useState("");
+  const [sceneBackgroundInput, setSceneBackgroundInput] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [usernameInput, setUsernameInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const { accessToken, refreshToken, user, setSession, clearSession } = useAuthStore();
-  const { connectionStatus, errorMessage, members, messages, self, roomId, tokens, setConnectionStatus, setRoomSnapshot, setBoardSnapshot, addMember, updateMember, removeMember, addMessage, upsertToken, removeToken, setErrorMessage } = useRoomStore();
+  const { connectionStatus, errorMessage, members, messages, self, roomId, tokens, scenes, activeScene, setConnectionStatus, setRoomSnapshot, setBoardSnapshot, setSceneSnapshot, updateScene, activateScene, addMember, updateMember, removeMember, addMessage, upsertToken, removeToken, setErrorMessage } = useRoomStore();
 
   useEffect(() => () => socketRef.current?.close(), []);
 
@@ -139,18 +154,34 @@ export function App() {
   const handleRoomEvent = (rawEvent: string) => {
     try {
       const event = JSON.parse(rawEvent) as RoomEvent;
-      if (event.type === "room.connected") { setConnectionStatus("connected"); setRoomSnapshot(event.room_id, event.self, event.members); setBoardSnapshot(event.board.tokens); }
+      if (event.type === "room.connected") { setConnectionStatus("connected"); setRoomSnapshot(event.room_id, event.self, event.members); setBoardSnapshot(event.board.tokens); setSceneSnapshot(event.scenes, event.active_scene); }
       if (event.type === "member.joined") addMember(event.member);
       if (event.type === "member.left") removeMember(event.user_id);
       if (event.type === "member.role.updated") updateMember(event.member);
       if (event.type === "member.removed") removeMember(event.user_id);
       if (event.type === "chat.message") addMessage(event.message);
+      if (event.type === "dice.result") addMessage({ message_id: event.result.roll_id, user_id: event.result.user_id, display_name: event.result.display_name, text: `🎲 ${event.result.expression} = ${event.result.total}（${event.result.rolls.join(" + ")}${event.result.modifier ? ` ${event.result.modifier > 0 ? "+" : ""}${event.result.modifier}` : ""}）` });
+      if (event.type === "scene.updated") updateScene(event.scene);
+      if (event.type === "scene.activated") activateScene(event.scene);
       if (event.type === "board.token.upserted") upsertToken(event.token);
       if (event.type === "board.token.removed") removeToken(event.token_id);
       if (event.type === "error") setErrorMessage(`房间服务错误：${event.code}`);
     } catch {
       setErrorMessage("收到无法识别的房间事件");
     }
+  };
+
+  const handleCreateScene = (event: FormEvent) => {
+    event.preventDefault();
+    if (socketRef.current?.readyState !== WebSocket.OPEN || self?.role !== "gm" || !sceneNameInput.trim()) return;
+    socketRef.current.send(JSON.stringify({ type: "scene.create", name: sceneNameInput.trim(), background_url: sceneBackgroundInput.trim() }));
+    setSceneNameInput("");
+    setSceneBackgroundInput("");
+  };
+
+  const handleActivateScene = (sceneId: string) => {
+    if (socketRef.current?.readyState !== WebSocket.OPEN || self?.role !== "gm") return;
+    socketRef.current.send(JSON.stringify({ type: "scene.activate", scene_id: sceneId }));
   };
 
   const handleAddToken = () => {
@@ -220,8 +251,9 @@ export function App() {
           <div className="sidebar-note"><span>当前房间</span><p>{roomId}</p></div>
         </aside>
         <section className="board-area">
-          <div className="board-toolbar"><span className="toolbar-title">场景 01 · 旧车站月台</span><div className="toolbar-actions"><button type="button" onClick={handleAddToken}>添加棋子</button><button type="button">场景</button><button type="button">资源</button></div></div>
-          <div className="board" ref={boardRef}><div className="board-grid" /><div className="board-location">旧车站 · 23:48</div>{tokens.map((token) => <button className="token" key={token.token_id} draggable style={{ left: `${token.x * 100}%`, top: `${token.y * 100}%`, background: token.color }} onDragEnd={(event) => handleMoveToken(token, event)} onDoubleClick={() => handleRemoveToken(token.token_id)} title="拖动移动，双击删除">{token.name.slice(0, 1)}</button>)}{tokens.length === 0 && <div className="board-empty-state"><span className="empty-icon">✦</span><strong>虚拟桌面准备就绪</strong><p>点击“添加棋子”，创建第一个可同步角色</p></div>}</div>
+          <div className="board-toolbar"><span className="toolbar-title">{activeScene?.name ?? "未选择场景"}</span><div className="toolbar-actions"><button type="button" onClick={handleAddToken}>添加棋子</button>{scenes.map((scene) => <button type="button" key={scene.scene_id} className={scene.is_active ? "active-tool" : ""} onClick={() => handleActivateScene(scene.scene_id)}>{scene.name}</button>)}</div></div>
+          {self?.role === "gm" && <form className="scene-form" onSubmit={handleCreateScene}><input aria-label="场景名称" placeholder="新场景名称" value={sceneNameInput} onChange={(event) => setSceneNameInput(event.target.value)} /><input aria-label="背景图地址" placeholder="背景图 URL（可选）" value={sceneBackgroundInput} onChange={(event) => setSceneBackgroundInput(event.target.value)} /><button type="submit">创建场景</button></form>}
+          <div className="board" ref={boardRef} style={activeScene?.background_url ? { backgroundImage: `linear-gradient(#10121866, #10121866), url(${activeScene.background_url})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}><div className="board-grid" /><div className="board-location">{activeScene?.name ?? "未选择场景"}</div>{tokens.map((token) => <button className="token" key={token.token_id} draggable style={{ left: `${token.x * 100}%`, top: `${token.y * 100}%`, background: token.color }} onDragEnd={(event) => handleMoveToken(token, event)} onDoubleClick={() => handleRemoveToken(token.token_id)} title="拖动移动，双击删除">{token.name.slice(0, 1)}</button>)}{tokens.length === 0 && <div className="board-empty-state"><span className="empty-icon">✦</span><strong>虚拟桌面准备就绪</strong><p>点击“添加棋子”，创建第一个可同步角色</p></div>}</div>
         </section>
         <aside className="chat-panel">
           <div className="panel-heading"><span>主频道</span><span className="muted">{messages.length} 条消息</span></div>
