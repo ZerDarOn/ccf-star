@@ -1,0 +1,2 @@
+"""coc-star API package."""
+

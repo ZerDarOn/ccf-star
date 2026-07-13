@@ -1,0 +1,13 @@
+{
+  "name": "coc-star",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.12.4",
+  "scripts": {
+    "dev:web": "pnpm --dir apps/web dev",
+    "build:web": "pnpm --dir apps/web build",
+    "test:web": "pnpm --dir apps/web test",
+    "lint:web": "pnpm --dir apps/web lint"
+  }
+}
+
