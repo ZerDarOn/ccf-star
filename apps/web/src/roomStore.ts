@@ -36,6 +36,7 @@ interface RoomState {
   setRoomSnapshot: (roomId: string, self: RoomMember, members: RoomMember[]) => void;
   setBoardSnapshot: (tokens: BoardToken[]) => void;
   addMember: (member: RoomMember) => void;
+  updateMember: (member: RoomMember) => void;
   removeMember: (userId: string) => void;
   addMessage: (message: ChatMessage) => void;
   upsertToken: (token: BoardToken) => void;
@@ -56,6 +57,10 @@ export const useRoomStore = create<RoomState>((set) => ({
   setBoardSnapshot: (tokens) => set({ tokens }),
   addMember: (member) => set((state) => ({
     members: [...state.members.filter((current) => current.user_id !== member.user_id), member],
+  })),
+  updateMember: (member) => set((state) => ({
+    members: state.members.map((current) => current.user_id === member.user_id ? member : current),
+    self: state.self?.user_id === member.user_id ? member : state.self,
   })),
   removeMember: (userId) => set((state) => ({
     members: state.members.filter((member) => member.user_id !== userId),

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from fastapi import WebSocket
 
@@ -58,6 +58,25 @@ class RoomManager:
     def members(self, room_id: str) -> list[RoomMember]:
         room = self._rooms.get(room_id, {})
         return [connection.member for connection in room.values()]
+
+    def connection(self, room_id: str, user_id: str) -> RoomConnection | None:
+        return self._rooms.get(room_id, {}).get(user_id)
+
+    def update_member_role(self, room_id: str, user_id: str, role: str) -> RoomMember | None:
+        connection = self.connection(room_id, user_id)
+        if connection is None:
+            return None
+        connection.member = replace(connection.member, role=role)
+        return connection.member
+
+    def detach(self, room_id: str, user_id: str) -> RoomConnection | None:
+        room = self._rooms.get(room_id)
+        if room is None:
+            return None
+        connection = room.pop(user_id, None)
+        if not room:
+            self._rooms.pop(room_id, None)
+        return connection
 
     def board_tokens(self, room_id: str) -> list[BoardToken]:
         return list(self._boards.get(room_id, {}).values())
