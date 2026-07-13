@@ -18,5 +18,6 @@ __pycache__/
 .venv-api/
 .pnpm-store/
 apps/api/*.db
+uploads/
 .DS_Store
 Thumbs.db

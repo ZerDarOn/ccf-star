@@ -2,6 +2,11 @@ from dataclasses import dataclass, replace
 
 from fastapi import WebSocket
 
+from coc_star_api.token_presentation import TokenFace, TokenPresentation
+from coc_star_api.scene_layer import SceneLayer
+from coc_star_api.room_bgm import BgmPlayback
+from coc_star_api.room_chat import RoomChatTab
+
 
 @dataclass(slots=True, frozen=True)
 class RoomMember:
@@ -63,8 +68,13 @@ class RoomManager:
     def __init__(self) -> None:
         self._rooms: dict[str, dict[str, RoomConnection]] = {}
         self._boards: dict[str, dict[str, BoardToken]] = {}
+        self._presentations: dict[str, dict[str, TokenPresentation]] = {}
+        self._faces: dict[str, dict[str, TokenFace]] = {}
         self._scenes: dict[str, dict[str, RoomScene]] = {}
         self._active_scenes: dict[str, str] = {}
+        self._scene_layers: dict[str, dict[str, SceneLayer]] = {}
+        self._bgm_playback: dict[str, dict[str, BgmPlayback]] = {}
+        self._chat_tabs: dict[str, dict[str, RoomChatTab]] = {}
         self._known_rooms: set[str] = set()
 
     def create_room(self, room_id: str) -> None:
@@ -114,6 +124,25 @@ class RoomManager:
             self._boards.pop(room_id, None)
         return token
 
+    def set_token_presentations(self, room_id: str, presentations: list[TokenPresentation], faces: list[TokenFace]) -> None:
+        self._presentations[room_id] = {item.token_id: item for item in presentations}
+        self._faces[room_id] = {item.face_id: item for item in faces}
+
+    def presentation(self, room_id: str, token_id: str) -> TokenPresentation:
+        return self._presentations.get(room_id, {}).get(token_id, TokenPresentation(token_id))
+
+    def faces(self, room_id: str, token_id: str) -> list[TokenFace]:
+        return [face for face in self._faces.get(room_id, {}).values() if face.token_id == token_id]
+
+    def upsert_presentation(self, room_id: str, presentation: TokenPresentation) -> None:
+        self._presentations.setdefault(room_id, {})[presentation.token_id] = presentation
+
+    def upsert_face(self, room_id: str, face: TokenFace) -> None:
+        self._faces.setdefault(room_id, {})[face.face_id] = face
+
+    def remove_face(self, room_id: str, face_id: str) -> TokenFace | None:
+        return self._faces.get(room_id, {}).pop(face_id, None)
+
     def set_scenes(self, room_id: str, scenes: list[RoomScene], active_scene_id: str | None) -> None:
         self._scenes[room_id] = {scene.scene_id: scene for scene in scenes}
         if active_scene_id is not None:
@@ -140,6 +169,40 @@ class RoomManager:
             scenes[current_id] = replace(current, is_active=current_id == scene_id)
         self._active_scenes[room_id] = scene_id
         return scenes[scene_id]
+
+    def set_scene_layers(self, layers: list[SceneLayer]) -> None:
+        for layer in layers:
+            self._scene_layers.setdefault(layer.scene_id, {})[layer.layer_id] = layer
+
+    def scene_layers(self, scene_id: str) -> list[SceneLayer]:
+        return sorted(self._scene_layers.get(scene_id, {}).values(), key=lambda layer: (layer.z_index, layer.layer_id))
+
+    def upsert_scene_layer(self, layer: SceneLayer) -> None:
+        self._scene_layers.setdefault(layer.scene_id, {})[layer.layer_id] = layer
+
+    def remove_scene_layer(self, scene_id: str, layer_id: str) -> SceneLayer | None:
+        return self._scene_layers.get(scene_id, {}).pop(layer_id, None)
+
+    def bgm_playback(self, room_id: str) -> list[BgmPlayback]:
+        return list(self._bgm_playback.get(room_id, {}).values())
+
+    def set_bgm_playback(self, room_id: str, playback: BgmPlayback) -> None:
+        self._bgm_playback.setdefault(room_id, {})[playback.slot] = playback
+
+    def set_chat_tabs(self, room_id: str, tabs: list[RoomChatTab]) -> None:
+        self._chat_tabs[room_id] = {tab.tab_id: tab for tab in tabs}
+
+    def chat_tabs(self, room_id: str) -> list[RoomChatTab]:
+        return sorted(self._chat_tabs.get(room_id, {}).values(), key=lambda tab: (tab.sort_order, tab.tab_id))
+
+    def chat_tab(self, room_id: str, tab_id: str | None) -> RoomChatTab | None:
+        tabs = self._chat_tabs.get(room_id, {})
+        if tab_id and tab_id in tabs:
+            return tabs[tab_id]
+        return next((tab for tab in tabs.values() if tab.tab_type == "main"), None)
+
+    def upsert_chat_tab(self, tab: RoomChatTab) -> None:
+        self._chat_tabs.setdefault(tab.room_id, {})[tab.tab_id] = tab
 
     async def join(self, room_id: str, connection: RoomConnection) -> list[RoomMember]:
         room = self._rooms.setdefault(room_id, {})
