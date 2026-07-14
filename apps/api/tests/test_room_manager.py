@@ -43,11 +43,13 @@ async def test_leave_broadcasts_and_removes_empty_room() -> None:
 
 def test_board_tokens_are_scoped_to_room() -> None:
     manager = RoomManager()
-    token = BoardToken("token-1", "u1", "调查员", 0.25, 0.5, "#d7b56d")
+    token = BoardToken("token-1", "u1", "调查员", 0.25, 0.5, "#d7b56d", "square", "character-1")
 
     manager.upsert_token("room-1", token)
 
     assert manager.board_tokens("room-1") == [token]
     assert manager.board_tokens("room-2") == []
+    assert token.to_payload()["character_id"] == "character-1"
+    assert token.to_payload()["shape"] == "square"
     assert manager.remove_token("room-1", "token-1") == token
     assert manager.get_token("room-1", "token-1") is None

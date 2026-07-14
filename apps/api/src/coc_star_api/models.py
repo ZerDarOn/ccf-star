@@ -17,6 +17,7 @@ class BoardTokenModel(Base):
     y: Mapped[float] = mapped_column(Float)
     color: Mapped[str] = mapped_column(String(7))
     shape: Mapped[str] = mapped_column(String(20), default="circle")
+    character_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
@@ -172,6 +173,32 @@ class RoomKnowledgeConfigModel(Base):
 
     room_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     knowledge_base_ids: Mapped[str] = mapped_column(Text, default="[]")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class CharacterLibraryModel(Base):
+    __tablename__ = "character_library"
+
+    character_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), index=True)
+    system: Mapped[str] = mapped_column(String(40), default="coc7")
+    name: Mapped[str] = mapped_column(String(160))
+    sheet_data: Mapped[str] = mapped_column(Text, default="{}")
+    source_type: Mapped[str] = mapped_column(String(30), default="manual")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class RoomCharacterModel(Base):
+    __tablename__ = "room_characters"
+
+    room_character_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    room_id: Mapped[str] = mapped_column(String(128), index=True)
+    character_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[str] = mapped_column(String(128), index=True)
+    sheet_data: Mapped[str] = mapped_column(Text, default="{}")
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 

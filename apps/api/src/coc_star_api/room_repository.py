@@ -89,6 +89,14 @@ class RoomRepository:
         await session.commit()
         return True
 
+    async def update_member_name(self, session: AsyncSession, room_id: str, user_id: str, display_name: str) -> bool:
+        member = await session.get(RoomMemberModel, (room_id, user_id))
+        if member is None:
+            return False
+        member.display_name = display_name
+        await session.commit()
+        return True
+
     async def remove_member(self, session: AsyncSession, room_id: str, user_id: str) -> bool:
         member = await session.get(RoomMemberModel, (room_id, user_id))
         if member is None:

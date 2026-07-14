@@ -37,8 +37,9 @@ class BoardToken:
     y: float
     color: str
     shape: str = "circle"
+    character_id: str | None = None
 
-    def to_payload(self) -> dict[str, str | float]:
+    def to_payload(self) -> dict[str, str | float | None]:
         return {
             "token_id": self.token_id,
             "owner_user_id": self.owner_user_id,
@@ -47,6 +48,7 @@ class BoardToken:
             "y": self.y,
             "color": self.color,
             "shape": self.shape,
+            "character_id": self.character_id,
         }
 
 
@@ -109,6 +111,13 @@ class RoomManager:
         if connection is None:
             return None
         connection.member = replace(connection.member, role=role)
+        return connection.member
+
+    def update_member_name(self, room_id: str, user_id: str, display_name: str) -> RoomMember | None:
+        connection = self.connection(room_id, user_id)
+        if connection is None:
+            return None
+        connection.member = replace(connection.member, display_name=display_name)
         return connection.member
 
     def detach(self, room_id: str, user_id: str) -> RoomConnection | None:

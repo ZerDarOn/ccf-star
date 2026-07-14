@@ -40,6 +40,7 @@ export interface BoardToken {
   y: number;
   color: string;
   shape: "circle" | "square";
+  character_id?: string | null;
   presentation?: TokenPresentation;
   faces?: TokenFace[];
 }

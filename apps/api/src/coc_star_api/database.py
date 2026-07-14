@@ -53,6 +53,8 @@ async def initialize_database() -> None:
             token_column_names = {row[1] for row in token_columns}
             if "shape" not in token_column_names:
                 await connection.execute(text("ALTER TABLE board_tokens ADD COLUMN shape VARCHAR(20) DEFAULT 'circle'"))
+            if "character_id" not in token_column_names:
+                await connection.execute(text("ALTER TABLE board_tokens ADD COLUMN character_id VARCHAR(64)"))
             knowledge_base_columns = await connection.execute(text("PRAGMA table_info(knowledge_bases)"))
             knowledge_base_column_names = {row[1] for row in knowledge_base_columns}
             if "parent_id" not in knowledge_base_column_names:

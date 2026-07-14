@@ -21,6 +21,7 @@ class BoardTokenRepository:
         model.y = token.y
         model.color = token.color
         model.shape = token.shape
+        model.character_id = token.character_id
         await session.commit()
 
     async def delete(self, session: AsyncSession, room_id: str, token_id: str) -> None:
@@ -37,4 +38,5 @@ class BoardTokenRepository:
             y=model.y,
             color=model.color,
             shape=model.shape,
+            character_id=model.character_id,
         )

@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from io import BytesIO
 from pathlib import Path
@@ -12,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.requests import ClientDisconnect
 
 from coc_star_api.room_manager import BoardToken, RoomConnection, RoomManager, RoomMember, RoomScene
 from coc_star_api.board_repository import BoardTokenRepository
@@ -35,8 +37,10 @@ from coc_star_api.session_auth import InvalidSessionToken, SessionClaims, Sessio
 from coc_star_api.settings import settings
 from coc_star_api.ai_provider import AiProviderError, complete
 from coc_star_api.ai_repository import AiRepository, decode_knowledge_base_ids, encode_knowledge_base_ids
+from coc_star_api.coc7_rules import canonical_check_target, derive_stats, parse_st, resolve_check
+from coc_star_api.character_repository import CharacterRepository, decode_sheet, encode_sheet
 from coc_star_api.knowledge_repository import KnowledgeRepository
-from coc_star_api.models import AiProviderConfigModel, AiRunLogModel, KnowledgeBaseModel, KnowledgeDocumentModel, RoomAiConfigModel, RoomKnowledgeConfigModel
+from coc_star_api.models import AiProviderConfigModel, AiRunLogModel, CharacterLibraryModel, KnowledgeBaseModel, KnowledgeDocumentModel, RoomAiConfigModel, RoomCharacterModel, RoomKnowledgeConfigModel
 
 app = FastAPI(title="coc-star API", version="0.1.0")
 asset_root = Path(settings.uploads_root).resolve()
@@ -60,6 +64,7 @@ room_bgm_repository = RoomBgmRepository()
 room_chat_tab_repository = RoomChatTabRepository()
 ai_repository = AiRepository()
 knowledge_repository = KnowledgeRepository()
+character_repository = CharacterRepository()
 user_repository = UserRepository()
 logger = logging.getLogger("coc-star.room")
 session_tokens = SessionTokenService(settings.session_secret)
@@ -82,6 +87,7 @@ class BoardTokenInput(BaseModel):
     y: float = Field(ge=0, le=1)
     color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
     shape: Literal["circle", "square"] = "circle"
+    character_id: str | None = Field(default=None, max_length=64)
 
 
 class RoomMemberRequest(BaseModel):
@@ -92,6 +98,10 @@ class RoomMemberRequest(BaseModel):
 class MemberRoleRequest(BaseModel):
     user_id: str = Field(min_length=1, max_length=128)
     role: Literal["gm", "player"]
+
+
+class MemberNameRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=40)
 
 
 class AccountCredentials(BaseModel):
@@ -195,6 +205,19 @@ class RoomKnowledgeRequest(BaseModel):
     knowledge_base_ids: list[str] = Field(default_factory=list, max_length=50)
 
 
+class CharacterLibraryRequest(BaseModel):
+    character_id: str | None = Field(default=None, max_length=64)
+    system: str = Field(default="coc7", max_length=40)
+    name: str = Field(min_length=1, max_length=160)
+    sheet_data: dict[str, object] = Field(default_factory=dict)
+    source_type: str = Field(default="manual", max_length=30)
+
+
+class StCharacterImportRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    text: str = Field(min_length=1, max_length=20_000)
+
+
 class RoomAiConfigRequest(BaseModel):
     provider_id: str | None = Field(default=None, max_length=64)
     enabled: bool = False
@@ -284,6 +307,86 @@ async def list_ai_providers(authorization: str | None = Header(default=None)) ->
     return {"providers": [ai_provider_payload(provider) for provider in providers]}
 
 
+@app.get("/api/characters")
+async def list_characters(authorization: str | None = Header(default=None)) -> dict[str, list[dict[str, object]]]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        characters = await character_repository.list_library(session, account.user_id)
+    return {"characters": [character_payload(character) for character in characters]}
+
+
+@app.post("/api/characters")
+async def save_character(request: CharacterLibraryRequest, authorization: str | None = Header(default=None)) -> dict[str, object]:
+    account = require_account(authorization)
+    character_id = request.character_id or str(uuid4())
+    async with session_factory() as session:
+        current = await character_repository.get_library(session, character_id, account.user_id)
+        if request.character_id and current is None:
+            raise HTTPException(status_code=404, detail="character_not_found")
+        character = CharacterLibraryModel(character_id=character_id, user_id=account.user_id, system=request.system, name=request.name.strip(), sheet_data=encode_sheet(request.sheet_data), source_type=request.source_type)
+        await character_repository.upsert_library(session, character)
+    logger.info("character_library_saved user_id=%s character_id=%s source=%s", account.user_id, character_id, request.source_type)
+    return {"character": character_payload(character)}
+
+
+@app.post("/api/characters/import-st")
+async def import_st_character(request: StCharacterImportRequest, authorization: str | None = Header(default=None)) -> dict[str, object]:
+    account = require_account(authorization)
+    imported = parse_st(request.text)
+    attributes = dict(imported.attributes)
+    resources = dict(imported.resources)
+    derived = derive_stats(attributes)
+    sheet_data = {
+        "attributes": attributes,
+        "resources": {
+            "hp": {"current": resources.get("hp", derived.hp_max), "max": derived.hp_max},
+            "mp": {"current": resources.get("mp", derived.mp_max), "max": derived.mp_max},
+            "san": {"current": resources.get("san", derived.san_max), "max": derived.san_max},
+        },
+        "skills": imported.skills,
+        "derived": {"build": derived.build, "damage_bonus": derived.damage_bonus},
+        "import_warnings": imported.warnings,
+    }
+    character = CharacterLibraryModel(character_id=str(uuid4()), user_id=account.user_id, system="coc7", name=request.name.strip(), sheet_data=encode_sheet(sheet_data), source_type="st")
+    async with session_factory() as session:
+        await character_repository.upsert_library(session, character)
+    logger.info("character_st_imported user_id=%s character_id=%s warnings=%s", account.user_id, character.character_id, len(imported.warnings))
+    return {"character": character_payload(character), "warnings": imported.warnings, "unknown_text": imported.unknown_text}
+
+
+@app.delete("/api/characters/{character_id}")
+async def delete_character(character_id: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        if not await character_repository.delete_library(session, character_id, account.user_id):
+            raise HTTPException(status_code=404, detail="character_not_found")
+    logger.info("character_library_deleted user_id=%s character_id=%s", account.user_id, character_id)
+    return {"character_id": character_id}
+
+
+@app.get("/api/rooms/{room_id}/characters")
+async def list_room_characters(room_id: str, authorization: str | None = Header(default=None)) -> dict[str, list[dict[str, object]]]:
+    account = require_account(authorization)
+    await require_room_member(room_id, account.user_id)
+    async with session_factory() as session:
+        characters = await character_repository.list_room_characters(session, room_id, account.user_id)
+    return {"characters": [room_character_payload(character) for character in characters]}
+
+
+@app.post("/api/rooms/{room_id}/characters/{character_id}")
+async def load_room_character(room_id: str, character_id: str, authorization: str | None = Header(default=None)) -> dict[str, object]:
+    account = require_account(authorization)
+    await require_room_member(room_id, account.user_id)
+    async with session_factory() as session:
+        character = await character_repository.get_library(session, character_id, account.user_id)
+        if character is None:
+            raise HTTPException(status_code=404, detail="character_not_found")
+        room_character = RoomCharacterModel(room_character_id=str(uuid4()), room_id=room_id, character_id=character.character_id, user_id=account.user_id, sheet_data=character.sheet_data)
+        await character_repository.add_room_character(session, room_character)
+    logger.info("room_character_loaded room_id=%s user_id=%s character_id=%s", room_id, account.user_id, character_id)
+    return {"character": room_character_payload(room_character)}
+
+
 @app.post("/api/ai/providers")
 async def save_ai_provider(request: AiProviderRequest, authorization: str | None = Header(default=None)) -> dict[str, object]:
     account = require_account(authorization)
@@ -367,7 +470,11 @@ async def import_knowledge_file(base_id: str, request: Request, authorization: s
     async with session_factory() as session:
         if await knowledge_repository.get_base(session, base_id, account.user_id) is None:
             raise HTTPException(status_code=404, detail="knowledge_base_not_found")
-    content = await request.body()
+    try:
+        content = await request.body()
+    except ClientDisconnect:
+        logger.warning("room_asset_upload_disconnected room_id=%s user_id=%s content_type=%s", room_id, account.user_id, content_type)
+        raise HTTPException(status_code=499, detail="asset_upload_disconnected") from None
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="knowledge_file_too_large")
     source_name = request.headers.get("x-file-name", "imported.txt")
@@ -567,10 +674,15 @@ async def upload_room_asset(room_id: str, request: Request, authorization: str |
         "image/webp": ".webp",
         "image/gif": ".gif",
         "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
         "audio/ogg": ".ogg",
         "audio/wav": ".wav",
         "audio/x-wav": ".wav",
         "audio/mp4": ".m4a",
+        "audio/aac": ".aac",
+        "audio/flac": ".flac",
+        "audio/x-flac": ".flac",
+        "audio/webm": ".webm",
     }
     extension = extensions.get(content_type)
     if extension is None:
@@ -671,6 +783,11 @@ async def room_socket(websocket: WebSocket, room_id: str) -> None:
             if payload.get("type") == "room.member.role.update":
                 await handle_member_role_update(websocket, room_id, member, payload)
                 continue
+            if payload.get("type") == "room.member.name.update":
+                updated_member = await handle_member_name_update(websocket, room_id, member, payload)
+                if updated_member is not None:
+                    member = updated_member
+                continue
             if payload.get("type") == "room.member.remove":
                 await handle_member_remove(websocket, room_id, member, payload)
                 continue
@@ -733,6 +850,28 @@ async def room_socket(websocket: WebSocket, room_id: str) -> None:
                     },
                 )
                 logger.info("dice_roll_broadcast room_id=%s user_id=%s expression=%s total=%s", room_id, user_id, result.expression, result.total)
+                continue
+            coc_target = parse_coc_check_command(message.text)
+            if coc_target is not None:
+                target, target_name = coc_target
+                if target is None:
+                    async with session_factory() as session:
+                        active_character = await character_repository.get_active_room_character(session, room_id, user_id)
+                    if active_character is not None:
+                        sheet = decode_sheet(active_character.sheet_data)
+                        resolved = canonical_check_target(target_name)
+                        if resolved is not None:
+                            category, field_id = resolved
+                            values = sheet.get("attributes" if category == "attribute" else "skills", {})
+                            if isinstance(values, dict) and isinstance(values.get(field_id), int):
+                                target = values[field_id]
+                if target is None:
+                    await websocket.send_json({"type": "error", "code": "character_check_target_missing"})
+                    continue
+                result = roll_dice("1d100")
+                check = resolve_check(target, result.total)
+                await room_manager.broadcast(room_id, {"type": "dice.result", "result": {"roll_id": str(uuid4()), "user_id": member.user_id, "display_name": member.display_name, "tab_id": chat_tab.tab_id if chat_tab else None, "expression": f"cc<={target} {target_name}", "rolls": list(result.rolls), "modifier": 0, "total": result.total, "target": target, "level": check.level}})
+                logger.info("coc_check_broadcast room_id=%s user_id=%s target_name=%s target=%s roll=%s level=%s", room_id, user_id, target_name, target, result.total, check.level)
                 continue
             visible_text = message.text
             owned_token = next((token for token in room_manager.board_tokens(room_id) if token.owner_user_id == member.user_id and token.token_id == message.token_id), None)
@@ -813,6 +952,19 @@ def parse_dice_command(text: str) -> str | None:
     return expression.strip() if separator else ""
 
 
+def parse_coc_check_command(text: str) -> tuple[int | None, str] | None:
+    normalized = text.strip()
+    if normalized.startswith("{") and "}" in normalized:
+        target_name, _, suffix = normalized[1:].partition("}")
+        if not target_name.strip() or suffix.strip():
+            return None
+        return None, target_name.strip()
+    match = re.fullmatch(r"cc\s*<=\s*(\d{1,3})(?:\s+(.+))?", normalized, re.IGNORECASE)
+    if match is None:
+        return None
+    return min(int(match.group(1)), 100), (match.group(2) or "检定").strip()
+
+
 def require_account(authorization: str | None) -> AccountClaims:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="account_auth_required")
@@ -848,6 +1000,14 @@ def knowledge_base_payload(base: KnowledgeBaseModel, document_count: int) -> dic
 
 def knowledge_document_payload(document: KnowledgeDocumentModel) -> dict[str, object]:
     return {"document_id": document.document_id, "knowledge_base_id": document.knowledge_base_id, "title": document.title, "content": document.content, "category": document.category, "source_type": document.source_type, "source_name": document.source_name, "mime_type": document.mime_type, "ai_enabled": document.ai_enabled, "created_at": document.created_at.isoformat() if document.created_at else None, "updated_at": document.updated_at.isoformat() if document.updated_at else None}
+
+
+def character_payload(character: CharacterLibraryModel) -> dict[str, object]:
+    return {"character_id": character.character_id, "system": character.system, "name": character.name, "source_type": character.source_type, "sheet_data": decode_sheet(character.sheet_data), "created_at": character.created_at.isoformat() if character.created_at else None, "updated_at": character.updated_at.isoformat() if character.updated_at else None}
+
+
+def room_character_payload(character: RoomCharacterModel) -> dict[str, object]:
+    return {"room_character_id": character.room_character_id, "room_id": character.room_id, "character_id": character.character_id, "sheet_data": decode_sheet(character.sheet_data), "active": character.active, "created_at": character.created_at.isoformat() if character.created_at else None}
 
 
 def ai_room_config_payload(config: RoomAiConfigModel | None) -> dict[str, object]:
@@ -913,17 +1073,31 @@ async def handle_token_upsert(
     if current_token is not None and current_token.owner_user_id != member.user_id and member.role != "gm":
         await websocket.send_json({"type": "error", "code": "board_token_forbidden"})
         return
+    token_owner_id = current_token.owner_user_id if current_token else member.user_id
+    current_character_id = current_token.character_id if current_token else None
+    character_binding_changed = token_input.character_id != current_character_id
+    if character_binding_changed and token_owner_id != member.user_id:
+        await websocket.send_json({"type": "error", "code": "character_binding_forbidden"})
+        return
     token = BoardToken(
         token_id=token_id,
-        owner_user_id=current_token.owner_user_id if current_token else member.user_id,
+        owner_user_id=token_owner_id,
         name=token_input.name,
         x=token_input.x,
         y=token_input.y,
         color=token_input.color,
-        shape=current_token.shape if current_token else token_input.shape,
+        shape=token_input.shape,
+        character_id=token_input.character_id,
     )
     try:
         async with session_factory() as session:
+            if token_input.character_id and token_owner_id == member.user_id:
+                if await character_repository.get_library(session, token_input.character_id, member.user_id) is None:
+                    await websocket.send_json({"type": "error", "code": "character_not_found"})
+                    return
+                if not await character_repository.activate_room_character(session, room_id, member.user_id, token_input.character_id):
+                    await websocket.send_json({"type": "error", "code": "character_not_loaded_in_room"})
+                    return
             await board_repository.upsert(session, room_id, token)
     except SQLAlchemyError:
         await websocket.send_json({"type": "error", "code": "board_persistence_failed"})
@@ -931,7 +1105,7 @@ async def handle_token_upsert(
         return
     room_manager.upsert_token(room_id, token)
     await room_manager.broadcast(room_id, {"type": "board.token.upserted", "token": board_token_payload(room_id, token)})
-    logger.info("board_token_upserted room_id=%s token_id=%s user_id=%s", room_id, token_id, member.user_id)
+    logger.info("board_token_upserted room_id=%s token_id=%s user_id=%s shape=%s", room_id, token_id, member.user_id, token.shape)
 
 
 async def handle_token_remove(
@@ -1090,6 +1264,38 @@ async def handle_member_role_update(
         return
     await room_manager.broadcast(room_id, {"type": "member.role.updated", "member": updated_member.to_payload()})
     logger.info("member_role_updated room_id=%s user_id=%s role=%s", room_id, request.user_id, request.role)
+
+
+async def handle_member_name_update(
+    websocket: WebSocket,
+    room_id: str,
+    actor: RoomMember,
+    payload: dict[str, object],
+) -> RoomMember | None:
+    try:
+        request = MemberNameRequest.model_validate(payload)
+    except ValidationError:
+        await websocket.send_json({"type": "error", "code": "invalid_member_name"})
+        return None
+    display_name = request.display_name.strip()
+    if not display_name:
+        await websocket.send_json({"type": "error", "code": "invalid_member_name"})
+        return None
+    try:
+        async with session_factory() as session:
+            if not await room_repository.update_member_name(session, room_id, actor.user_id, display_name):
+                await websocket.send_json({"type": "error", "code": "member_not_found"})
+                return None
+    except SQLAlchemyError:
+        logger.exception("member_name_update_failed room_id=%s user_id=%s", room_id, actor.user_id)
+        await websocket.send_json({"type": "error", "code": "member_persistence_failed"})
+        return None
+    updated_member = room_manager.update_member_name(room_id, actor.user_id, display_name)
+    if updated_member is None:
+        return None
+    await room_manager.broadcast(room_id, {"type": "member.name.updated", "member": updated_member.to_payload()})
+    logger.info("member_name_updated room_id=%s user_id=%s", room_id, actor.user_id)
+    return updated_member
 
 
 async def handle_member_remove(

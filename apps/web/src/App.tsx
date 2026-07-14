@@ -8,12 +8,16 @@ import { RoomDrawer } from "./RoomDrawer";
 import { RoomAiPanel, type AiLogSummary, type AiProviderSummary, type KnowledgeBaseSummary, type KnowledgeDocumentSummary, type RoomAiConfig } from "./RoomAiPanel";
 import { KnowledgeBasePanel } from "./KnowledgeBasePanel";
 import { RoomKnowledgePanel } from "./RoomKnowledgePanel";
+import { CharacterLibraryPanel, type CharacterSummary } from "./CharacterLibraryPanel";
+import { RoomCharacterPanel, type RoomCharacterSummary } from "./RoomCharacterPanel";
+import { DiceConfigPanel, type DiceShortcut } from "./DiceConfigPanel";
 
 type RoomEvent =
   | { type: "room.connected"; room_id: string; self: RoomMember; members: RoomMember[]; board: { tokens: BoardToken[] }; scenes: RoomScene[]; active_scene: RoomScene | null; scene_layers: SceneLayer[]; bgm_tracks: BgmTrack[]; bgm_playback: BgmPlayback[]; chat_tabs: ChatTab[] }
   | { type: "member.joined"; member: RoomMember }
   | { type: "member.left"; user_id: string }
   | { type: "member.role.updated"; member: RoomMember }
+  | { type: "member.name.updated"; member: RoomMember }
   | { type: "member.removed"; user_id: string }
   | { type: "chat.message"; message: ChatMessage }
   | { type: "dice.result"; result: DiceResult }
@@ -60,7 +64,14 @@ interface DiceResult {
 }
 
 type AppView = "auth" | "home" | "room";
-type RoomDrawerName = "ai" | "audio" | "characters" | "knowledge" | "members" | "none" | "scene";
+type RoomDrawerName = "ai" | "audio" | "characters" | "dice" | "knowledge" | "members" | "none" | "scene";
+
+const defaultDiceShortcuts: DiceShortcut[] = [
+  { id: "d100", label: "百分骰", expression: "1d100" },
+  { id: "d20", label: "D20", expression: "1d20" },
+  { id: "d6", label: "D6", expression: "1d6" },
+  { id: "damage", label: "伤害", expression: "2d6+3" },
+];
 
 export function App() {
   const socketRef = useRef<WebSocket | null>(null);
@@ -72,6 +83,8 @@ export function App() {
   const [messageInput, setMessageInput] = useState("");
   const [chatTabId, setChatTabId] = useState<string | null>(null);
   const [chatNameInput, setChatNameInput] = useState("");
+  const [memberNameInput, setMemberNameInput] = useState("");
+  const [diceShortcuts, setDiceShortcuts] = useState<DiceShortcut[]>(defaultDiceShortcuts);
   const [chatColorInput, setChatColorInput] = useState("#d7b56d");
   const [chatTokenId, setChatTokenId] = useState<string | null>(null);
   const [chatFaceId, setChatFaceId] = useState<string | null>(null);
@@ -100,6 +113,7 @@ export function App() {
   const [bgmSlotInput, setBgmSlotInput] = useState<BgmSlot>("bgm01");
   const [bgmNameInput, setBgmNameInput] = useState("");
   const [bgmFile, setBgmFile] = useState<File | null>(null);
+  const [bgmUploadStatus, setBgmUploadStatus] = useState("");
   const [bgmVolume, setBgmVolume] = useState<Record<BgmSlot, number>>({ bgm01: 0.8, bgm02: 0.8 });
   const [bgmMuted, setBgmMuted] = useState<Record<BgmSlot, boolean>>({ bgm01: false, bgm02: false });
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
@@ -131,10 +145,32 @@ export function App() {
   const [knowledgeParentIdInput, setKnowledgeParentIdInput] = useState("");
   const [roomMountedKnowledgeIds, setRoomMountedKnowledgeIds] = useState<string[]>([]);
   const [tokenShapeInput, setTokenShapeInput] = useState<BoardToken["shape"]>("circle");
+  const [tokenCharacterIdInput, setTokenCharacterIdInput] = useState<string | null>(null);
   const [homeKnowledgeOpen, setHomeKnowledgeOpen] = useState(false);
   const [homeKnowledgeKind, setHomeKnowledgeKind] = useState<"knowledge" | "documents">("knowledge");
+  const [homeCharactersOpen, setHomeCharactersOpen] = useState(false);
+  const [characters, setCharacters] = useState<CharacterSummary[]>([]);
+  const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
+  const [characterNameInput, setCharacterNameInput] = useState("");
+  const [characterStInput, setCharacterStInput] = useState("");
+  const [roomCharacters, setRoomCharacters] = useState<RoomCharacterSummary[]>([]);
 
   useEffect(() => () => socketRef.current?.close(), []);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("coc-star:dice-shortcuts");
+    if (!saved) return;
+    try {
+      const parsed = JSON.parse(saved) as DiceShortcut[];
+      if (Array.isArray(parsed) && parsed.every((item) => typeof item.id === "string" && typeof item.label === "string" && typeof item.expression === "string")) setDiceShortcuts(parsed);
+    } catch {
+      window.localStorage.removeItem("coc-star:dice-shortcuts");
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("coc-star:dice-shortcuts", JSON.stringify(diceShortcuts));
+  }, [diceShortcuts]);
 
   useEffect(() => {
     if (!user) setAppView("auth");
@@ -153,6 +189,50 @@ export function App() {
     } finally {
       setIsLoadingRooms(false);
     }
+  };
+
+  const loadCharacters = async () => {
+    if (!accessToken) return;
+    const response = await fetch(`${apiBaseUrl}/api/characters`, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!response.ok) { setErrorMessage("角色库读取失败"); return; }
+    const result = await response.json() as { characters: CharacterSummary[] };
+    setCharacters(result.characters);
+    if (!selectedCharacterId && result.characters[0]) setSelectedCharacterId(result.characters[0].character_id);
+  };
+
+  const importStCharacter = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!accessToken || !characterNameInput.trim() || !characterStInput.trim()) return;
+    const response = await fetch(`${apiBaseUrl}/api/characters/import-st`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` }, body: JSON.stringify({ name: characterNameInput, text: characterStInput }) });
+    if (!response.ok) { setErrorMessage(".st 角色卡导入失败"); return; }
+    const result = await response.json() as { character: CharacterSummary };
+    setCharacterNameInput(""); setCharacterStInput(""); setSelectedCharacterId(result.character.character_id); setErrorMessage(null); await loadCharacters();
+  };
+
+  const deleteCharacter = async (characterId: string) => {
+    if (!accessToken || !window.confirm("确定删除这张角色卡吗？")) return;
+    const response = await fetch(`${apiBaseUrl}/api/characters/${encodeURIComponent(characterId)}`, { method: "DELETE", headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!response.ok) { setErrorMessage("角色卡删除失败"); return; }
+    setSelectedCharacterId(null); await loadCharacters();
+  };
+
+  const loadRoomCharacters = async () => {
+    if (!accessToken || !roomId) return;
+    const [libraryResponse, roomResponse] = await Promise.all([
+      fetch(`${apiBaseUrl}/api/characters`, { headers: { Authorization: `Bearer ${accessToken}` } }),
+      fetch(`${apiBaseUrl}/api/rooms/${encodeURIComponent(roomId)}/characters`, { headers: { Authorization: `Bearer ${accessToken}` } }),
+    ]);
+    if (!libraryResponse.ok || !roomResponse.ok) { setErrorMessage("房间角色读取失败"); return; }
+    const libraryResult = await libraryResponse.json() as { characters: CharacterSummary[] };
+    const roomResult = await roomResponse.json() as { characters: RoomCharacterSummary[] };
+    setCharacters(libraryResult.characters); setRoomCharacters(roomResult.characters);
+  };
+
+  const loadCharacterIntoRoom = async (characterId: string) => {
+    if (!accessToken || !roomId) return;
+    const response = await fetch(`${apiBaseUrl}/api/rooms/${encodeURIComponent(roomId)}/characters/${encodeURIComponent(characterId)}`, { method: "POST", headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!response.ok) { setErrorMessage("角色加载失败"); return; }
+    setErrorMessage(null); await loadRoomCharacters();
   };
 
   const handleRemoveRoom = async (room: RoomSummary) => {
@@ -184,10 +264,11 @@ export function App() {
       const track = bgmTracks.find((item) => item.slot === playback.slot);
       if (!track) return;
       const currentAudio = audioRefs.current[playback.slot];
-      const audio = currentAudio ?? new Audio(track.audio_url);
-      if (!currentAudio || currentAudio.src !== track.audio_url) {
+      const audioUrl = new URL(track.audio_url, window.location.origin).href;
+      const audio = currentAudio ?? new Audio(audioUrl);
+      if (!currentAudio || currentAudio.src !== audioUrl) {
         currentAudio?.pause();
-        audio.src = track.audio_url;
+        audio.src = audioUrl;
         audioRefs.current[playback.slot] = audio;
       }
       audio.loop = track.loop;
@@ -221,7 +302,8 @@ export function App() {
     setTokenNameInput(selectedToken.name);
     setTokenScaleInput(String(selectedToken.presentation?.scale ?? 1));
     setTokenShapeInput(selectedToken.shape);
-  }, [selectedTokenId, tokens]);
+    setTokenCharacterIdInput(selectedToken.character_id ?? null);
+  }, [selectedTokenId]);
 
   useEffect(() => {
     if (self && !chatNameInput) setChatNameInput(self.display_name);
@@ -457,16 +539,25 @@ export function App() {
   }, [activeDrawer, appView, roomId, accessToken, selectedKnowledgeBaseId]);
 
   useEffect(() => {
+    if (appView === "room" && activeDrawer === "characters") void loadRoomCharacters();
+  }, [activeDrawer, appView, roomId, accessToken]);
+
+  useEffect(() => {
     if (appView === "home" && homeKnowledgeOpen) void loadKnowledgeWorkspace();
   }, [appView, homeKnowledgeOpen, accessToken, selectedKnowledgeBaseId]);
+
+  useEffect(() => {
+    if (appView === "home" && homeCharactersOpen) void loadCharacters();
+  }, [appView, homeCharactersOpen, accessToken]);
 
   const handleRoomEvent = (rawEvent: string) => {
     try {
       const event = JSON.parse(rawEvent) as RoomEvent;
-      if (event.type === "room.connected") { setConnectionStatus("connected"); setRoomSnapshot(event.room_id, event.self, event.members); setBoardSnapshot(event.board.tokens); setChatTabs(event.chat_tabs); setSceneSnapshot(event.scenes, event.active_scene); setSceneLayers(event.scene_layers); setBgmSnapshot(event.bgm_tracks, event.bgm_playback); setChatNameInput(event.self.display_name); setChatTabId(event.chat_tabs.find((tab) => tab.tab_type === "main")?.tab_id ?? event.chat_tabs[0]?.tab_id ?? null); setAppView("room"); }
+      if (event.type === "room.connected") { setConnectionStatus("connected"); setRoomSnapshot(event.room_id, event.self, event.members); setBoardSnapshot(event.board.tokens); setChatTabs(event.chat_tabs); setSceneSnapshot(event.scenes, event.active_scene); setSceneLayers(event.scene_layers); setBgmSnapshot(event.bgm_tracks, event.bgm_playback); setChatNameInput(event.self.display_name); setMemberNameInput(event.self.display_name); setChatTabId(event.chat_tabs.find((tab) => tab.tab_type === "main")?.tab_id ?? event.chat_tabs[0]?.tab_id ?? null); setAppView("room"); }
       if (event.type === "member.joined") addMember(event.member);
       if (event.type === "member.left") removeMember(event.user_id);
       if (event.type === "member.role.updated") updateMember(event.member);
+      if (event.type === "member.name.updated") { updateMember(event.member); if (event.member.user_id === user?.user_id) { setMemberNameInput(event.member.display_name); setChatNameInput(event.member.display_name); } }
       if (event.type === "member.removed") removeMember(event.user_id);
       if (event.type === "chat.message") addMessage(event.message);
       if (event.type === "dice.result") addMessage({ message_id: event.result.roll_id, user_id: event.result.user_id, display_name: event.result.display_name, text: `🎲 ${event.result.expression} = ${event.result.total}（${event.result.rolls.join(" + ")}${event.result.modifier ? ` ${event.result.modifier > 0 ? "+" : ""}${event.result.modifier}` : ""}）`, tab_id: event.result.tab_id });
@@ -474,7 +565,7 @@ export function App() {
       if (event.type === "scene.activated") { activateScene(event.scene); setSceneLayers(event.layers); }
       if (event.type === "scene.layer.upserted") upsertSceneLayer(event.layer);
       if (event.type === "scene.layer.removed") removeSceneLayer(event.layer_id);
-      if (event.type === "bgm.track.upserted") upsertBgmTrack(event.track);
+      if (event.type === "bgm.track.upserted") { upsertBgmTrack(event.track); setBgmUploadStatus(`${event.track.name} 已装载到 ${event.track.slot.toUpperCase()}`); }
       if (event.type === "bgm.track.removed") { const removedTrack = bgmTracks.find((track) => track.bgm_id === event.bgm_id); if (removedTrack) { audioRefs.current[removedTrack.slot]?.pause(); audioRefs.current[removedTrack.slot] = null; } removeBgmTrack(event.bgm_id); }
       if (event.type === "bgm.control") setBgmPlayback(event.playback);
       if (event.type === "chat.tab.created") upsertChatTab(event.tab);
@@ -574,13 +665,19 @@ export function App() {
 
   const handleAddBgm = async (event: FormEvent) => {
     event.preventDefault();
-    if (self?.role !== "gm" || socketRef.current?.readyState !== WebSocket.OPEN || !bgmFile || !bgmNameInput.trim()) return;
+    if (self?.role !== "gm") { setErrorMessage("只有 GM 可以管理声音槽位"); return; }
+    if (socketRef.current?.readyState !== WebSocket.OPEN) { setErrorMessage("房间连接尚未就绪"); return; }
+    if (!bgmFile) { setErrorMessage("请先选择音频文件"); return; }
     try {
+      setBgmUploadStatus("正在上传音频…");
       const audioUrl = await uploadAsset(bgmFile);
-      socketRef.current.send(JSON.stringify({ type: "bgm.track.upsert", slot: bgmSlotInput, name: bgmNameInput.trim(), audio_url: audioUrl, loop: true }));
+      const trackName = bgmNameInput.trim() || bgmFile.name.replace(/\.[^.]+$/, "");
+      socketRef.current.send(JSON.stringify({ type: "bgm.track.upsert", slot: bgmSlotInput, name: trackName, audio_url: audioUrl, loop: true }));
+      setBgmUploadStatus("音频已上传，正在写入槽位…");
       setBgmNameInput("");
       setBgmFile(null);
     } catch (error) {
+      setBgmUploadStatus("");
       setErrorMessage(error instanceof Error ? error.message : "BGM 上传失败");
     }
   };
@@ -605,14 +702,21 @@ export function App() {
 
   const uploadAsset = async (file: File) => {
     if (!accessToken || !user) throw new Error("请先登录账号");
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    const inferredTypes: Record<string, string> = { mp3: "audio/mpeg", ogg: "audio/ogg", wav: "audio/wav", m4a: "audio/mp4", aac: "audio/aac", flac: "audio/flac", webm: "audio/webm", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
+    const contentType = file.type || (extension ? inferredTypes[extension] : "");
+    if (!contentType) throw new Error("无法识别文件格式");
     const response = await fetch(`${apiBaseUrl}/api/rooms/${encodeURIComponent(roomId)}/assets`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": file.type },
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": contentType },
       body: file,
     });
-    if (!response.ok) throw new Error("图片上传失败");
+    if (!response.ok) {
+      const detail = await response.json().catch(() => null) as { detail?: string } | null;
+      throw new Error(detail?.detail === "asset_too_large" ? "文件为空或超过大小限制" : detail?.detail === "unsupported_asset_type" ? "暂不支持这种文件格式" : detail?.detail === "asset_upload_disconnected" ? "上传连接中断，请重试；如果使用隧道，请确认隧道仍在线" : "素材上传失败");
+    }
     const result = await response.json() as { url: string };
-    return result.url.startsWith("http") ? result.url : `${apiBaseUrl}${result.url}`;
+    return result.url;
   };
 
   const handleSaveToken = async (event: FormEvent) => {
@@ -621,7 +725,7 @@ export function App() {
     if (!selectedToken || !self || (self.role !== "gm" && selectedToken.owner_user_id !== self.user_id) || socketRef.current?.readyState !== WebSocket.OPEN) return;
     try {
       const imageUrl = tokenImageFile ? await uploadAsset(tokenImageFile) : selectedToken.presentation?.image_url ?? null;
-      socketRef.current.send(JSON.stringify({ type: "board.token.upsert", token_id: selectedToken.token_id, name: tokenNameInput.trim() || selectedToken.name, x: selectedToken.x, y: selectedToken.y, color: selectedToken.color, shape: tokenShapeInput }));
+      socketRef.current.send(JSON.stringify({ type: "board.token.upsert", token_id: selectedToken.token_id, name: tokenNameInput.trim() || selectedToken.name, x: selectedToken.x, y: selectedToken.y, color: selectedToken.color, shape: tokenShapeInput, character_id: tokenCharacterIdInput }));
       socketRef.current.send(JSON.stringify({ type: "board.token.presentation.update", token_id: selectedToken.token_id, token_type: imageUrl ? "character" : "npc", image_url: imageUrl, scale: Number(tokenScaleInput) || 1, active_face_id: selectedToken.presentation?.active_face_id ?? null }));
       setTokenImageFile(null);
     } catch (error) {
@@ -671,6 +775,13 @@ export function App() {
     socketRef.current.send(JSON.stringify({ type: "room.member.role.update", user_id: userId, role }));
   };
 
+  const handleMemberNameUpdate = (event: FormEvent) => {
+    event.preventDefault();
+    const displayName = memberNameInput.trim();
+    if (!displayName || socketRef.current?.readyState !== WebSocket.OPEN) return;
+    socketRef.current.send(JSON.stringify({ type: "room.member.name.update", display_name: displayName }));
+  };
+
   const handleMemberRemove = (userId: string) => {
     if (socketRef.current?.readyState !== WebSocket.OPEN) return;
     socketRef.current.send(JSON.stringify({ type: "room.member.remove", user_id: userId }));
@@ -713,6 +824,8 @@ export function App() {
   const stageFace = stageToken?.faces?.find((face) => face.face_id === stageMessage?.face_id) ?? stageToken?.faces?.find((face) => face.face_id === stageToken.presentation?.active_face_id);
   const stageImage = stageFace?.image_url ?? stageToken?.presentation?.image_url ?? stageMessage?.ai_avatar_url;
   const ownTokens = tokens.filter((token) => token.owner_user_id === self?.user_id);
+  const loadedCharacterIds = new Set(roomCharacters.map((character) => character.character_id));
+  const loadedCharacters = characters.filter((character) => loadedCharacterIds.has(character.character_id));
   const chatToken = ownTokens.find((token) => token.token_id === chatTokenId);
   const chatTokenFace = chatToken?.faces?.find((face) => face.face_id === chatToken.presentation?.active_face_id);
   const chatTokenImage = chatTokenFace?.image_url ?? chatToken?.presentation?.image_url;
@@ -746,11 +859,13 @@ export function App() {
       onLogout={handleLogout}
       onOpenRoom={handleOpenRoom}
       onOpenKnowledgeBase={handleOpenKnowledgeBase}
+      onOpenCharacters={() => setHomeCharactersOpen(true)}
       onRemoveRoom={handleRemoveRoom}
       onRoomIdChange={setRoomInput}
       onRefreshRooms={() => void loadMyRooms()}
       />
       {homeKnowledgeOpen && <KnowledgeBasePanel bases={knowledgeBases.filter((base) => base.kind === homeKnowledgeKind)} documents={knowledgeDocuments} selectedBaseId={selectedKnowledgeBaseId} selectedDocumentId={selectedDocumentId} name={knowledgeNameInput} kind={knowledgeKindInput} parentId={knowledgeParentIdInput} title={documentTitleInput} category={documentCategoryInput} content={documentContentInput} aiEnabled={documentAiEnabledInput} onClose={() => setHomeKnowledgeOpen(false)} onSelectBase={handleKnowledgeBaseChange} onSelectDocument={(document) => { setSelectedDocumentId(document.document_id); setDocumentTitleInput(document.title); setDocumentCategoryInput(document.category); setDocumentContentInput(document.content); setDocumentAiEnabledInput(document.ai_enabled !== false); }} onNewDocument={() => { setSelectedDocumentId(null); setDocumentTitleInput(""); setDocumentCategoryInput(""); setDocumentContentInput(""); setDocumentAiEnabledInput(true); }} onNameChange={setKnowledgeNameInput} onKindChange={setKnowledgeKindInput} onParentIdChange={setKnowledgeParentIdInput} onTitleChange={setDocumentTitleInput} onCategoryChange={setDocumentCategoryInput} onContentChange={setDocumentContentInput} onAiEnabledChange={setDocumentAiEnabledInput} onCreateBase={createKnowledgeBase} onSaveDocument={saveKnowledgeDocument} onDeleteBase={deleteKnowledgeBase} onDeleteDocument={deleteKnowledgeDocument} onImportFile={importKnowledgeFile} />}
+      {homeCharactersOpen && <CharacterLibraryPanel characters={characters} name={characterNameInput} stText={characterStInput} selectedCharacterId={selectedCharacterId} onClose={() => setHomeCharactersOpen(false)} onNameChange={setCharacterNameInput} onStTextChange={setCharacterStInput} onImportSt={importStCharacter} onSelect={setSelectedCharacterId} onDelete={deleteCharacter} />}
     </>;
   }
 
@@ -778,9 +893,9 @@ export function App() {
       {self?.role === "gm" && <RoomDrawer title="房间 AI 助手" open={activeDrawer === "ai"} onClose={() => setActiveDrawer("none")}><RoomAiPanel config={aiConfig} providers={aiProviders} logs={aiLogs} providerName={providerNameInput} providerBaseUrl={providerBaseUrlInput} providerModel={providerModelInput} providerApiKey={providerApiKeyInput} onConfigChange={setAiConfig} onProviderNameChange={setProviderNameInput} onProviderBaseUrlChange={setProviderBaseUrlInput} onProviderModelChange={setProviderModelInput} onProviderApiKeyChange={setProviderApiKeyInput} onSaveConfig={saveRoomAiConfig} onSaveProvider={saveAiProvider} /></RoomDrawer>}
       {self?.role === "gm" && <RoomDrawer title="房间知识库挂载" open={activeDrawer === "knowledge"} onClose={() => setActiveDrawer("none")}><RoomKnowledgePanel bases={knowledgeBases} mountedIds={roomMountedKnowledgeIds} onMountedIdsChange={setRoomMountedKnowledgeIds} onSave={() => void saveRoomKnowledge()} /></RoomDrawer>}
       <RoomDrawer title="我的角色" open={activeDrawer === "characters"} onClose={() => setActiveDrawer("none")}>
+        <RoomCharacterPanel characters={characters} roomCharacters={roomCharacters} onLoad={(characterId) => void loadCharacterIntoRoom(characterId)} />
         <div className="drawer-token-list"><div className="drawer-section-heading"><span>我的 Token</span><button type="button" onClick={handleAddToken}>新建</button></div>{ownTokens.map((token) => <button type="button" key={token.token_id} className={token.token_id === selectedTokenId ? "drawer-list-item drawer-list-item-active" : "drawer-list-item"} onClick={() => setSelectedTokenId(token.token_id)}><span className="drawer-token-swatch" style={{ background: token.presentation?.image_url ? `url(${token.presentation.image_url}) center / cover` : token.color }} />{token.name}<small>{token.presentation?.image_url ? "角色" : "NPC"}</small></button>)}{ownTokens.length === 0 && <p className="empty-copy">还没有自己的 Token。新建后可上传立绘与差分。</p>}</div>
-        {canEditSelectedToken && selectedToken && <label className="token-shape-control">Token 形状<select value={tokenShapeInput} onChange={(event) => setTokenShapeInput(event.target.value as BoardToken["shape"])}><option value="circle">圆形</option><option value="square">方形</option></select></label>}
-        {canEditSelectedToken && selectedToken ? <TokenEditor token={selectedToken} tokenNameInput={tokenNameInput} tokenScaleInput={tokenScaleInput} tokenShapeInput={tokenShapeInput} faceLabelInput={faceLabelInput} faceTriggerInput={faceTriggerInput} onNameChange={setTokenNameInput} onScaleChange={setTokenScaleInput} onShapeChange={setTokenShapeInput} onImageChange={setTokenImageFile} onSave={handleSaveToken} onFaceLabelChange={setFaceLabelInput} onFaceTriggerChange={setFaceTriggerInput} onFaceImageChange={setFaceImageFile} onAddFace={handleAddFace} onRemoveFace={handleRemoveFace} /> : <p className="drawer-hint">选择一个自己的 Token 后，在这里编辑立绘与差分。</p>}
+        {canEditSelectedToken && selectedToken ? <TokenEditor characters={loadedCharacters} token={selectedToken} tokenNameInput={tokenNameInput} tokenScaleInput={tokenScaleInput} tokenShapeInput={tokenShapeInput} tokenCharacterIdInput={tokenCharacterIdInput} faceLabelInput={faceLabelInput} faceTriggerInput={faceTriggerInput} onNameChange={setTokenNameInput} onScaleChange={setTokenScaleInput} onShapeChange={setTokenShapeInput} onCharacterChange={setTokenCharacterIdInput} onImageChange={setTokenImageFile} onSave={handleSaveToken} onFaceLabelChange={setFaceLabelInput} onFaceTriggerChange={setFaceTriggerInput} onFaceImageChange={setFaceImageFile} onAddFace={handleAddFace} onRemoveFace={handleRemoveFace} /> : <p className="drawer-hint">选择一个自己的 Token 后，在这里编辑立绘与差分。</p>}
       </RoomDrawer>
       {self?.role === "gm" && <RoomDrawer title="场景与图层" open={activeDrawer === "scene"} onClose={() => setActiveDrawer("none")}>
         <form className="scene-form" onSubmit={handleCreateScene}><input aria-label="场景名称" placeholder="新场景名称" value={sceneNameInput} onChange={(event) => setSceneNameInput(event.target.value)} /><input aria-label="背景图地址" placeholder="背景图 URL（可选）" value={sceneBackgroundInput} onChange={(event) => setSceneBackgroundInput(event.target.value)} /><button type="submit">创建场景</button></form>
@@ -790,12 +905,13 @@ export function App() {
         <div className="scene-layer-list">{sceneLayers.map((layer) => <div className="scene-layer-row" key={layer.layer_id}><span>{layer.name}</span><small>{layer.layer_type}</small><button type="button" onClick={() => handleToggleLayer(layer)}>{layer.visible ? "隐藏" : "显示"}</button><button type="button" onClick={() => handleRemoveLayer(layer)}>删除</button></div>)}</div>
         {sceneLayers.length > 0 && <div className="layer-nudge"><label>调整图层<select value={selectedLayerId ?? ""} onChange={(event) => setSelectedLayerId(event.target.value || null)}><option value="">选择图层</option>{sceneLayers.map((layer) => <option value={layer.layer_id} key={layer.layer_id}>{layer.name}</option>)}</select></label><div className="nudge-buttons"><button type="button" onClick={() => handleNudgeLayer(0, -0.02)}>上</button><button type="button" onClick={() => handleNudgeLayer(-0.02, 0)}>左</button><button type="button" onClick={() => handleNudgeLayer(0.02, 0)}>右</button><button type="button" onClick={() => handleNudgeLayer(0, 0.02)}>下</button></div></div>}
       </RoomDrawer>}
+      <RoomDrawer title="骰子配置" open={activeDrawer === "dice"} onClose={() => setActiveDrawer("none")}><DiceConfigPanel shortcuts={diceShortcuts} onChange={setDiceShortcuts} /></RoomDrawer>
       {self?.role === "gm" && <RoomDrawer title="声音与 BGM" open={activeDrawer === "audio"} onClose={() => setActiveDrawer("none")}>
-        <form className="bgm-upload-form" onSubmit={handleAddBgm}><select value={bgmSlotInput} onChange={(event) => setBgmSlotInput(event.target.value as BgmSlot)} aria-label="BGM 槽位"><option value="bgm01">BGM01</option><option value="bgm02">BGM02</option></select><input value={bgmNameInput} onChange={(event) => setBgmNameInput(event.target.value)} placeholder="曲目名称" aria-label="曲目名称" /><input type="file" accept="audio/mpeg,audio/ogg,audio/wav,audio/mp4" onChange={(event) => setBgmFile(event.target.files?.[0] ?? null)} aria-label="BGM 音频" /><button type="submit">上传到槽位</button></form>
+        <form className="bgm-upload-form" onSubmit={handleAddBgm}><select value={bgmSlotInput} onChange={(event) => setBgmSlotInput(event.target.value as BgmSlot)} aria-label="BGM 槽位"><option value="bgm01">BGM01</option><option value="bgm02">BGM02</option></select><input value={bgmNameInput} onChange={(event) => setBgmNameInput(event.target.value)} placeholder="曲目名称（可选，默认文件名）" aria-label="曲目名称" /><input type="file" accept="audio/mpeg,audio/ogg,audio/wav,audio/mp4,audio/aac,audio/flac,audio/webm" onChange={(event) => setBgmFile(event.target.files?.[0] ?? null)} aria-label="BGM 音频" /><button type="submit">上传到槽位</button>{bgmUploadStatus && <small className="drawer-hint">{bgmUploadStatus}</small>}</form>
         <div className="bgm-list">{(["bgm01", "bgm02"] as BgmSlot[]).map((slot) => { const track = bgmTracks.find((item) => item.slot === slot); const playback = bgmPlayback.find((item) => item.slot === slot); return <div className="bgm-row" key={slot}><div className="bgm-info"><strong>{slot.toUpperCase()}</strong><span>{track?.name ?? "未设置曲目"}</span></div><div className="bgm-controls"><button type="button" disabled={!track} onClick={() => handleBgmControl(slot, "play")}>播放</button><button type="button" disabled={!track} onClick={() => handleBgmControl(slot, "pause")}>暂停</button><button type="button" disabled={!track} onClick={() => handleBgmControl(slot, "stop")}>停止</button>{track && <button type="button" onClick={() => socketRef.current?.send(JSON.stringify({ type: "bgm.track.remove", bgm_id: track.bgm_id }))}>移除</button>}<input type="range" min="0" max="1" step="0.05" value={bgmVolume[slot]} onChange={(event) => handleBgmVolume(slot, Number(event.target.value))} aria-label={`${slot} 音量`} /><button type="button" onClick={() => handleBgmMute(slot)}>{bgmMuted[slot] ? "取消静音" : "静音"}</button><small>{playback?.is_playing ? "播放中" : "已暂停"}</small></div></div>; })}</div>
       </RoomDrawer>}
       <RoomDrawer title="房间成员" open={activeDrawer === "members"} onClose={() => setActiveDrawer("none")}>
-        <div className="drawer-room-id"><span>房间号</span><strong>{roomId}</strong></div><div className="player-list">{members.map((member) => <MemberRow key={member.user_id} member={member} self={member.user_id === self?.user_id} canManage={self?.role === "gm"} onRoleUpdate={handleMemberRoleUpdate} onRemove={handleMemberRemove} />)}{members.length === 0 && <p className="empty-copy">还没有其他成员加入。</p>}</div>
+        <div className="drawer-room-id"><span>房间号</span><strong>{roomId}</strong></div><form className="member-name-form" onSubmit={handleMemberNameUpdate}><label>我的房间昵称<input value={memberNameInput} onChange={(event) => setMemberNameInput(event.target.value)} maxLength={40} /><small>这个名字会显示在成员列表和普通发言中</small></label><button type="submit">保存昵称</button></form><div className="player-list">{members.map((member) => <MemberRow key={member.user_id} member={member} self={member.user_id === self?.user_id} canManage={self?.role === "gm"} onRoleUpdate={handleMemberRoleUpdate} onRemove={handleMemberRemove} />)}{members.length === 0 && <p className="empty-copy">还没有其他成员加入。</p>}</div>
       </RoomDrawer>
       <section className={`workspace ${chatCollapsed ? "workspace-chat-collapsed" : ""}`}>
         <aside className="sidebar">
@@ -811,12 +927,12 @@ export function App() {
           {self?.role === "gm" && <form className="scene-form" onSubmit={handleCreateScene}><input aria-label="场景名称" placeholder="新场景名称" value={sceneNameInput} onChange={(event) => setSceneNameInput(event.target.value)} /><input aria-label="背景图地址" placeholder="背景图 URL（可选）" value={sceneBackgroundInput} onChange={(event) => setSceneBackgroundInput(event.target.value)} /><button type="submit">创建场景</button></form>}
           {self?.role === "gm" && <form className="scene-layer-form" onSubmit={handleAddLayer}><select aria-label="图层类型" value={layerTypeInput} onChange={(event) => setLayerTypeInput(event.target.value as SceneLayer["layer_type"])}><option value="background">背景</option><option value="foreground">前景</option><option value="panel">屏幕面板</option><option value="marker">标记</option></select><input aria-label="图层名称" placeholder="图层名称" value={layerNameInput} onChange={(event) => setLayerNameInput(event.target.value)} /><input aria-label="标记文字" placeholder="标记文字（可选）" value={layerTextInput} onChange={(event) => setLayerTextInput(event.target.value)} /><input aria-label="图层图片" type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => setLayerImageFile(event.target.files?.[0] ?? null)} /><button type="submit">添加图层</button></form>}
           {sceneLayers.length > 0 && <div className="scene-layer-list">{sceneLayers.map((layer) => <div className="scene-layer-row" key={layer.layer_id}><span>{layer.name}</span><small>{layer.layer_type}</small>{self?.role === "gm" && <><button type="button" onClick={() => handleToggleLayer(layer)}>{layer.visible ? "隐藏" : "显示"}</button><button type="button" onClick={() => handleRemoveLayer(layer)}>删除</button></>}</div>)}</div>}
-          <section className="bgm-panel"><div className="panel-heading"><span>BGM 播放</span><span className="muted">房间同步 / 本地音量</span></div>{self?.role === "gm" && <form className="bgm-upload-form" onSubmit={handleAddBgm}><select value={bgmSlotInput} onChange={(event) => setBgmSlotInput(event.target.value as BgmSlot)} aria-label="BGM 槽位"><option value="bgm01">BGM01</option><option value="bgm02">BGM02</option></select><input value={bgmNameInput} onChange={(event) => setBgmNameInput(event.target.value)} placeholder="曲目名称" aria-label="曲目名称" /><input type="file" accept="audio/mpeg,audio/ogg,audio/wav,audio/mp4" onChange={(event) => setBgmFile(event.target.files?.[0] ?? null)} aria-label="BGM 音频" /><button type="submit">上传到槽位</button></form>}<div className="bgm-list">{(["bgm01", "bgm02"] as BgmSlot[]).map((slot) => { const track = bgmTracks.find((item) => item.slot === slot); const playback = bgmPlayback.find((item) => item.slot === slot); return <div className="bgm-row" key={slot}><div className="bgm-info"><strong>{slot.toUpperCase()}</strong><span>{track?.name ?? "未设置曲目"}</span></div><div className="bgm-controls">{self?.role === "gm" && <><button type="button" disabled={!track} onClick={() => handleBgmControl(slot, "play")}>播放</button><button type="button" disabled={!track} onClick={() => handleBgmControl(slot, "pause")}>暂停</button><button type="button" disabled={!track} onClick={() => handleBgmControl(slot, "stop")}>停止</button>{track && <button type="button" onClick={() => socketRef.current?.send(JSON.stringify({ type: "bgm.track.remove", bgm_id: track.bgm_id }))}>移除</button>}</>}<input type="range" min="0" max="1" step="0.05" value={bgmVolume[slot]} onChange={(event) => handleBgmVolume(slot, Number(event.target.value))} aria-label={`${slot} 音量`} /><button type="button" onClick={() => handleBgmMute(slot)}>{bgmMuted[slot] ? "取消静音" : "静音"}</button><small>{playback?.is_playing ? "播放中" : "已暂停"}</small></div></div>; })}</div></section>
-          {canEditSelectedToken && selectedToken && <TokenEditor token={selectedToken} tokenNameInput={tokenNameInput} tokenScaleInput={tokenScaleInput} tokenShapeInput={tokenShapeInput} faceLabelInput={faceLabelInput} faceTriggerInput={faceTriggerInput} onNameChange={setTokenNameInput} onScaleChange={setTokenScaleInput} onShapeChange={setTokenShapeInput} onImageChange={setTokenImageFile} onSave={handleSaveToken} onFaceLabelChange={setFaceLabelInput} onFaceTriggerChange={setFaceTriggerInput} onFaceImageChange={setFaceImageFile} onAddFace={handleAddFace} onRemoveFace={handleRemoveFace} />}
+          <section className="bgm-panel"><div className="panel-heading"><span>BGM 播放</span><span className="muted">房间同步 / 本地音量</span></div>{self?.role === "gm" && <form className="bgm-upload-form" onSubmit={handleAddBgm}><select value={bgmSlotInput} onChange={(event) => setBgmSlotInput(event.target.value as BgmSlot)} aria-label="BGM 槽位"><option value="bgm01">BGM01</option><option value="bgm02">BGM02</option></select><input value={bgmNameInput} onChange={(event) => setBgmNameInput(event.target.value)} placeholder="曲目名称（可选，默认文件名）" aria-label="曲目名称" /><input type="file" accept="audio/mpeg,audio/ogg,audio/wav,audio/mp4,audio/aac,audio/flac,audio/webm" onChange={(event) => setBgmFile(event.target.files?.[0] ?? null)} aria-label="BGM 音频" /><button type="submit">上传到槽位</button>{bgmUploadStatus && <small className="drawer-hint">{bgmUploadStatus}</small>}</form>}<div className="bgm-list">{(["bgm01", "bgm02"] as BgmSlot[]).map((slot) => { const track = bgmTracks.find((item) => item.slot === slot); const playback = bgmPlayback.find((item) => item.slot === slot); return <div className="bgm-row" key={slot}><div className="bgm-info"><strong>{slot.toUpperCase()}</strong><span>{track?.name ?? "未设置曲目"}</span></div><div className="bgm-controls">{self?.role === "gm" && <><button type="button" disabled={!track} onClick={() => handleBgmControl(slot, "play")}>播放</button><button type="button" disabled={!track} onClick={() => handleBgmControl(slot, "pause")}>暂停</button><button type="button" disabled={!track} onClick={() => handleBgmControl(slot, "stop")}>停止</button>{track && <button type="button" onClick={() => socketRef.current?.send(JSON.stringify({ type: "bgm.track.remove", bgm_id: track.bgm_id }))}>移除</button>}</>}<input type="range" min="0" max="1" step="0.05" value={bgmVolume[slot]} onChange={(event) => handleBgmVolume(slot, Number(event.target.value))} aria-label={`${slot} 音量`} /><button type="button" onClick={() => handleBgmMute(slot)}>{bgmMuted[slot] ? "取消静音" : "静音"}</button><small>{playback?.is_playing ? "播放中" : "已暂停"}</small></div></div>; })}</div></section>
+          {canEditSelectedToken && selectedToken && <TokenEditor characters={loadedCharacters} token={selectedToken} tokenNameInput={tokenNameInput} tokenScaleInput={tokenScaleInput} tokenShapeInput={tokenShapeInput} tokenCharacterIdInput={tokenCharacterIdInput} faceLabelInput={faceLabelInput} faceTriggerInput={faceTriggerInput} onNameChange={setTokenNameInput} onScaleChange={setTokenScaleInput} onShapeChange={setTokenShapeInput} onCharacterChange={setTokenCharacterIdInput} onImageChange={setTokenImageFile} onSave={handleSaveToken} onFaceLabelChange={setFaceLabelInput} onFaceTriggerChange={setFaceTriggerInput} onFaceImageChange={setFaceImageFile} onAddFace={handleAddFace} onRemoveFace={handleRemoveFace} />}
           <div className="quick-tools"><button type="button" onClick={handleAddToken}>Token</button><button type="button" onClick={() => handleFocusTool(".scene-layer-form")}>图层</button><button type="button" onClick={() => handleFocusTool(".bgm-panel")}>音乐</button><button type="button" onClick={() => handleFocusTool(".chat-composer")}>发言</button></div>
           {self?.role === "gm" && sceneLayers.length > 0 && <div className="layer-nudge"><label>调整图层<select value={selectedLayerId ?? ""} onChange={(event) => setSelectedLayerId(event.target.value || null)}><option value="">选择图层</option>{sceneLayers.map((layer) => <option value={layer.layer_id} key={layer.layer_id}>{layer.name}</option>)}</select></label><div className="nudge-buttons"><button type="button" onClick={() => handleNudgeLayer(0, -0.02)}>上</button><button type="button" onClick={() => handleNudgeLayer(-0.02, 0)}>左</button><button type="button" onClick={() => handleNudgeLayer(0.02, 0)}>右</button><button type="button" onClick={() => handleNudgeLayer(0, 0.02)}>下</button></div><small>每次移动 2%</small></div>}
           {stageMessage && <div className="stage-dialogue"><div className="stage-portrait" style={stageImage ? { backgroundImage: `url(${stageImage})` } : { background: stageToken?.color ?? "#d7b56d" }}>{stageImage ? "" : (stageMessage.character_name || stageMessage.display_name).slice(0, 1)}</div><div className="stage-dialogue-body"><strong style={{ color: stageMessage.character_color ?? "#f0dca9" }}>{stageMessage.character_name || stageMessage.display_name}</strong><p>{stageMessage.text}</p></div></div>}
-          <div className="board" ref={boardRef} style={activeScene?.background_url ? { backgroundImage: `linear-gradient(#10121866, #10121866), url(${activeScene.background_url})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}><div className="board-grid" />{sceneLayers.filter((layer) => layer.visible).map((layer) => <div className={`scene-layer scene-layer-${layer.layer_type} scene-layer-shape-${layer.shape} ${self?.role === "gm" ? "scene-layer-editable" : ""} ${selectedLayerId === layer.layer_id ? "scene-layer-selected" : ""}`} key={layer.layer_id} style={{ left: `${layer.x * 100}%`, top: `${layer.y * 100}%`, width: `${layer.width * 100}%`, height: `${layer.height * 100}%`, zIndex: layer.layer_type === "background" ? 0 : Math.max(layer.z_index, 2), opacity: layer.opacity, filter: layer.blur > 0 ? `blur(${layer.blur}px)` : undefined, backgroundImage: layer.image_url ? `url(${layer.image_url})` : undefined, backgroundSize: layer.image_fit, backgroundColor: layer.image_url ? undefined : "#242b38" }} onPointerDown={(event) => handleLayerPointerDown(layer, "move", event)} onPointerMove={handleLayerPointerMove} onPointerUp={handleLayerPointerUp} title={self?.role === "gm" ? "拖动移动图层，拖右下角调整大小" : layer.name}>{layer.text}{self?.role === "gm" && selectedLayerId === layer.layer_id && <span className="scene-layer-resize" onPointerDown={(event) => handleLayerPointerDown(layer, "resize", event)} />}</div>)}<div className="board-location">{activeScene?.name ?? "未选择场景"}</div>{tokens.map((token) => { const face = token.faces?.find((item) => item.face_id === token.presentation?.active_face_id); const imageUrl = face?.image_url ?? token.presentation?.image_url; return <button className={`token token-shape-${token.shape} ${selectedTokenId === token.token_id ? "token-selected" : ""}`} key={token.token_id} draggable style={{ left: `${token.x * 100}%`, top: `${token.y * 100}%`, width: `${56 * (token.presentation?.scale ?? 1)}px`, height: `${56 * (token.presentation?.scale ?? 1)}px`, background: imageUrl ? `url(${imageUrl}) center / cover` : token.color }} onClick={() => setSelectedTokenId(token.token_id)} onDragEnd={(event) => handleMoveToken(token, event)} onDoubleClick={() => handleRemoveToken(token.token_id)} title="点击编辑，拖动移动，双击删除">{imageUrl ? "" : token.name.slice(0, 1)}</button>; })}{tokens.length === 0 && <div className="board-empty-state"><span className="empty-icon">✦</span><strong>虚拟桌面准备就绪</strong><p>点击“添加棋子”，创建第一个可同步角色</p></div>}</div>
+          <div className="board" ref={boardRef} style={activeScene?.background_url ? { backgroundImage: `linear-gradient(#10121866, #10121866), url(${activeScene.background_url})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}><div className="board-grid" />{sceneLayers.filter((layer) => layer.visible).map((layer) => <div className={`scene-layer scene-layer-${layer.layer_type} scene-layer-shape-${layer.shape} ${self?.role === "gm" ? "scene-layer-editable" : ""} ${selectedLayerId === layer.layer_id ? "scene-layer-selected" : ""}`} key={layer.layer_id} style={{ left: `${layer.x * 100}%`, top: `${layer.y * 100}%`, width: `${layer.width * 100}%`, height: `${layer.height * 100}%`, zIndex: layer.layer_type === "background" ? 0 : Math.max(layer.z_index, 2), opacity: layer.opacity, filter: layer.blur > 0 ? `blur(${layer.blur}px)` : undefined, backgroundImage: layer.image_url ? `url(${layer.image_url})` : undefined, backgroundSize: layer.image_fit, backgroundColor: layer.image_url ? undefined : "#242b38" }} onPointerDown={(event) => handleLayerPointerDown(layer, "move", event)} onPointerMove={handleLayerPointerMove} onPointerUp={handleLayerPointerUp} title={self?.role === "gm" ? "拖动移动图层，拖右下角调整大小" : layer.name}>{layer.text}{self?.role === "gm" && selectedLayerId === layer.layer_id && <span className="scene-layer-resize" onPointerDown={(event) => handleLayerPointerDown(layer, "resize", event)} />}</div>)}<div className="board-location">{activeScene?.name ?? "未选择场景"}</div>{tokens.map((token) => { const face = token.faces?.find((item) => item.face_id === token.presentation?.active_face_id); const imageUrl = face?.image_url ?? token.presentation?.image_url; const tokenSize = 56 * (token.presentation?.scale ?? 1); const displayShape = selectedTokenId === token.token_id ? tokenShapeInput : token.shape; return <button className={`token token-shape-${displayShape} ${selectedTokenId === token.token_id ? "token-selected" : ""}`} key={token.token_id} draggable style={{ left: `${token.x * 100}%`, top: `${token.y * 100}%`, width: `${tokenSize}px`, height: `${tokenSize}px`, borderRadius: displayShape === "circle" ? "50%" : "8px", background: imageUrl ? `url(${imageUrl}) center / cover` : token.color }} onClick={() => setSelectedTokenId(token.token_id)} onDragEnd={(event) => handleMoveToken(token, event)} onDoubleClick={() => handleRemoveToken(token.token_id)} title="点击编辑，拖动移动，双击删除">{imageUrl ? "" : token.name.slice(0, 1)}</button>; })}{tokens.length === 0 && <div className="board-empty-state"><span className="empty-icon">✦</span><strong>虚拟桌面准备就绪</strong><p>点击“添加棋子”，创建第一个可同步角色</p></div>}</div>
         </section>
         <ChatPanel
           collapsed={chatCollapsed}
@@ -840,6 +956,8 @@ export function App() {
           selectedTokenFaces={chatToken?.faces ?? []}
           selectedTokenImage={chatTokenImage}
           selectedTokenColor={chatToken?.color}
+          diceShortcuts={diceShortcuts}
+          onOpenDiceConfig={() => setActiveDrawer("dice")}
           chatName={chatNameInput}
           onChatNameChange={setChatNameInput}
           chatColor={chatColorInput}
@@ -875,6 +993,8 @@ interface ChatPanelProps {
   selectedTokenFaces: TokenFace[];
   selectedTokenImage?: string | null;
   selectedTokenColor?: string;
+  diceShortcuts: DiceShortcut[];
+  onOpenDiceConfig: () => void;
   chatName: string;
   onChatNameChange: (value: string) => void;
   chatColor: string;
@@ -884,7 +1004,7 @@ interface ChatPanelProps {
   onSend: (event: FormEvent) => void;
 }
 
-function ChatPanel({ collapsed, tabs, activeTabId, onToggleCollapsed, onTabChange, showChannelForm, onToggleChannelForm, channelName, onChannelNameChange, channelDialogue, onChannelDialogueChange, onCreateChannel, messages, ownTokens, selectedTokenId, onTokenChange, selectedFaceId, onFaceChange, selectedTokenFaces, selectedTokenImage, selectedTokenColor, chatName, onChatNameChange, chatColor, onChatColorChange, message, onMessageChange, onSend }: ChatPanelProps) {
+function ChatPanel({ collapsed, tabs, activeTabId, onToggleCollapsed, onTabChange, showChannelForm, onToggleChannelForm, channelName, onChannelNameChange, channelDialogue, onChannelDialogueChange, onCreateChannel, messages, ownTokens, selectedTokenId, onTokenChange, selectedFaceId, onFaceChange, selectedTokenFaces, selectedTokenImage, selectedTokenColor, diceShortcuts, onOpenDiceConfig, chatName, onChatNameChange, chatColor, onChatColorChange, message, onMessageChange, onSend }: ChatPanelProps) {
   const [showFacePickerLocal, setShowFacePickerLocal] = useState(false);
   return <aside className={`chat-panel ${collapsed ? "chat-panel-collapsed" : ""}`}>
     <div className="chat-panel-header"><span>聊天频道</span><button type="button" aria-expanded={!collapsed} aria-label={collapsed ? "展开聊天频道" : "收起聊天频道"} onClick={onToggleCollapsed}>{collapsed ? "展开" : "收起"}</button></div>
@@ -894,7 +1014,7 @@ function ChatPanel({ collapsed, tabs, activeTabId, onToggleCollapsed, onTabChang
       <div className="message-list">{messages.map((item) => <MessageRow key={item.message_id} message={item} />)}{messages.length === 0 && <p className="empty-copy">当前频道还没有消息</p>}</div>
       <div className="chat-identity"><button type="button" className={`chat-portrait ${selectedTokenId ? "chat-portrait-clickable" : ""}`} onClick={() => selectedTokenFaces.length > 0 && setShowFacePickerLocal((value) => !value)} style={selectedTokenImage ? { backgroundImage: `url(${selectedTokenImage})` } : { background: selectedTokenColor ?? "#3a4050" }} aria-label="打开 Token 差分">{selectedTokenImage ? "" : "无"}</button><select aria-label="选择角色卡" value={selectedTokenId ?? ""} onChange={(event) => onTokenChange(event.target.value || null)}><option value="">☰ 无（不使用角色卡）</option>{ownTokens.map((token) => <option value={token.token_id} key={token.token_id}>☰ {token.name}</option>)}</select><input aria-label="发言名称" value={chatName} onChange={(event) => onChatNameChange(event.target.value)} maxLength={40} /><input className="chat-color-picker" aria-label="名字颜色" type="color" value={chatColor} onChange={(event) => onChatColorChange(event.target.value)} /></div>
       {showFacePickerLocal && selectedTokenFaces.length > 0 && <div className="chat-face-picker"><button type="button" className={!selectedFaceId ? "active-face" : ""} onClick={() => onFaceChange("")}>默认</button>{selectedTokenFaces.map((face) => <button type="button" className={face.face_id === selectedFaceId ? "active-face" : ""} key={face.face_id} onClick={() => onFaceChange(face.face_id)}><img src={face.image_url} alt={face.label} /><span>{face.label}</span></button>)}</div>}
-      <div className="dice-shortcuts">{["1d100", "1d20", "1d6", "2d6+3"].map((expression) => <button type="button" key={expression} onClick={() => onMessageChange(`/r ${expression}`)}>◇ {expression}</button>)}</div>
+      <div className="dice-shortcuts">{diceShortcuts.map((shortcut) => <button type="button" key={shortcut.id} onClick={() => onMessageChange(`/r ${shortcut.expression}`)}>◇ {shortcut.label}</button>)}<button type="button" className="dice-config-button" onClick={onOpenDiceConfig} aria-label="打开骰子配置">⚙</button></div>
       <form className="chat-composer" onSubmit={onSend}><input aria-label="聊天消息" placeholder="输入消息…" value={message} onChange={(event) => onMessageChange(event.target.value)} /><button type="submit">发送</button></form>
     </>}
   </aside>;
@@ -905,6 +1025,7 @@ function connectionStatusLabel(status: string) {
 }
 
 interface TokenEditorProps {
+  characters: CharacterSummary[];
   faceLabelInput: string;
   faceTriggerInput: string;
   onAddFace: (event: FormEvent) => void;
@@ -917,14 +1038,16 @@ interface TokenEditorProps {
   onSave: (event: FormEvent) => void;
   onScaleChange: (value: string) => void;
   onShapeChange: (value: BoardToken["shape"]) => void;
+  onCharacterChange: (value: string | null) => void;
   token: BoardToken;
   tokenNameInput: string;
   tokenScaleInput: string;
   tokenShapeInput: BoardToken["shape"];
+  tokenCharacterIdInput: string | null;
 }
 
-function TokenEditor({ faceLabelInput, faceTriggerInput, onAddFace, onFaceImageChange, onFaceLabelChange, onFaceTriggerChange, onImageChange, onNameChange, onRemoveFace, onSave, onScaleChange, token, tokenNameInput, tokenScaleInput }: TokenEditorProps) {
-  return <section className="token-editor"><div className="token-editor-heading"><strong>Token 编辑</strong><span>{token.presentation?.image_url ? "角色" : "NPC"}</span></div><form className="token-editor-form" onSubmit={onSave}><label>名称<input value={tokenNameInput} onChange={(event) => onNameChange(event.target.value)} maxLength={40} /></label><label>大小<input type="number" min="0.25" max="4" step="0.25" value={tokenScaleInput} onChange={(event) => onScaleChange(event.target.value)} /></label><label>立绘<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => onImageChange(event.target.files?.[0] ?? null)} /></label><button type="submit">保存 Token</button></form><div className="face-editor"><span className="face-editor-title">自定义差分</span><form onSubmit={onAddFace}><label>差分名称<input aria-label="差分名称" placeholder="例如：哭泣" value={faceLabelInput} onChange={(event) => onFaceLabelChange(event.target.value)} maxLength={80} /></label><label>触发关键词<input aria-label="差分触发关键词" placeholder="例如：哭泣" value={faceTriggerInput} onChange={(event) => onFaceTriggerChange(event.target.value)} maxLength={80} /></label><input aria-label="差分图片" type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => onFaceImageChange(event.target.files?.[0] ?? null)} /><button type="submit">添加差分</button></form><div className="face-list">{(token.faces ?? []).map((face) => <div className="face-row" key={face.face_id}><img src={face.image_url} alt={face.label} /><span>{face.label} · #{face.trigger ?? face.label}</span><button type="button" onClick={() => onRemoveFace(face)}>删除</button></div>)}{(token.faces ?? []).length === 0 && <small>还没有差分。发言末尾输入 #关键词 或 @关键词 会切换差分，并隐藏指令。</small>}</div></div></section>;
+function TokenEditor({ characters, faceLabelInput, faceTriggerInput, onAddFace, onFaceImageChange, onFaceLabelChange, onFaceTriggerChange, onImageChange, onNameChange, onRemoveFace, onSave, onScaleChange, onShapeChange, onCharacterChange, token, tokenNameInput, tokenScaleInput, tokenShapeInput, tokenCharacterIdInput }: TokenEditorProps) {
+  return <section className="token-editor"><div className="token-editor-heading"><strong>Token 编辑</strong><span>{tokenCharacterIdInput ? "角色卡" : token.presentation?.image_url ? "角色" : "NPC"}</span></div><form className="token-editor-form" onSubmit={onSave}><label>名称<input value={tokenNameInput} onChange={(event) => onNameChange(event.target.value)} maxLength={40} /></label><label>Token 形状<select value={tokenShapeInput} onChange={(event) => onShapeChange(event.target.value as BoardToken["shape"])}><option value="circle">圆形</option><option value="square">方形</option></select></label><label>绑定角色卡<select value={tokenCharacterIdInput ?? ""} onChange={(event) => onCharacterChange(event.target.value || null)}><option value="">不绑定角色卡</option>{characters.map((character) => <option key={character.character_id} value={character.character_id}>{character.name}</option>)}</select></label><label>大小<input type="number" min="0.25" max="4" step="0.25" value={tokenScaleInput} onChange={(event) => onScaleChange(event.target.value)} /></label><label>立绘<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => onImageChange(event.target.files?.[0] ?? null)} /></label><button type="submit">保存 Token</button></form><div className="face-editor"><span className="face-editor-title">自定义差分</span><form onSubmit={onAddFace}><label>差分名称<input aria-label="差分名称" placeholder="例如：哭泣" value={faceLabelInput} onChange={(event) => onFaceLabelChange(event.target.value)} maxLength={80} /></label><label>触发关键词<input aria-label="差分触发关键词" placeholder="例如：哭泣" value={faceTriggerInput} onChange={(event) => onFaceTriggerChange(event.target.value)} maxLength={80} /></label><input aria-label="差分图片" type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => onFaceImageChange(event.target.files?.[0] ?? null)} /><button type="submit">添加差分</button></form><div className="face-list">{(token.faces ?? []).map((face) => <div className="face-row" key={face.face_id}><img src={face.image_url} alt={face.label} /><span>{face.label} · #{face.trigger ?? face.label}</span><button type="button" onClick={() => onRemoveFace(face)}>删除</button></div>)}{(token.faces ?? []).length === 0 && <small>还没有差分。发言末尾输入 #关键词 或 @关键词 会切换差分，并隐藏指令。</small>}</div></div></section>;
 }
 
 interface MemberRowProps {
