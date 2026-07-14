@@ -16,6 +16,7 @@ export interface HomePageProps {
   onJoinRoom: (event: FormEvent) => void;
   onLogout: () => void;
   onOpenRoom: (roomId: string) => void;
+  onOpenKnowledgeBase: (kind: "knowledge" | "documents") => void;
   onRemoveRoom: (room: RoomSummary) => void;
   onRoomIdChange: (value: string) => void;
   onRefreshRooms: () => void;
@@ -30,7 +31,7 @@ export interface RoomSummary {
   room_id: string;
 }
 
-export function HomePage({ connectionStatus, displayName, errorMessage, isLoadingRooms, roomId, rooms, user, onCreateRoom, onDisplayNameChange, onJoinRoom, onLogout, onOpenRoom, onRemoveRoom, onRoomIdChange, onRefreshRooms }: HomePageProps) {
+export function HomePage({ connectionStatus, displayName, errorMessage, isLoadingRooms, roomId, rooms, user, onCreateRoom, onDisplayNameChange, onJoinRoom, onLogout, onOpenRoom, onOpenKnowledgeBase, onRemoveRoom, onRoomIdChange, onRefreshRooms }: HomePageProps) {
   const ownedRooms = rooms.filter((room) => room.is_owner);
   const joinedRooms = rooms.filter((room) => !room.is_owner);
 
@@ -41,7 +42,7 @@ export function HomePage({ connectionStatus, displayName, errorMessage, isLoadin
       <article className="room-entry-card room-entry-primary"><span className="eyebrow">新建</span><h2>创建一间房</h2><p>你会成为 GM，并获得场景、图层与音乐控制权。</p><label>显示名称<input value={displayName} onChange={(event) => onDisplayNameChange(event.target.value)} maxLength={40} required /></label><button className="primary-action" type="button" onClick={onCreateRoom} disabled={!displayName.trim() || connectionStatus === "connecting"}>创建并进入</button></article>
       <article className="room-entry-card"><span className="eyebrow">加入</span><h2>进入已有房间</h2><p>输入房间号后，以玩家身份加入当前的跑团。</p><form className="join-room-form" onSubmit={onJoinRoom}><label>房间号<input value={roomId} onChange={(event) => onRoomIdChange(event.target.value)} required /></label><label>显示名称<input value={displayName} onChange={(event) => onDisplayNameChange(event.target.value)} maxLength={40} required /></label><button className="secondary-action" type="submit" disabled={!displayName.trim() || !roomId.trim() || connectionStatus === "connecting"}>{connectionStatus === "connecting" ? "正在连接" : "加入房间"}</button></form></article>
     </section>
-    <section className="home-section knowledge-section"><div className="section-heading"><div><span className="eyebrow">准备工作</span><h2>知识库</h2></div><span>为后续 AI 辅助跑团预留</span></div><div className="knowledge-grid"><button type="button" className="knowledge-card" disabled><span className="knowledge-icon">✦</span><strong>知识库</strong><small>整理世界观、规则与设定</small><em>即将开放</em></button><button type="button" className="knowledge-card" disabled><span className="knowledge-icon">▤</span><strong>文档库</strong><small>集中保存剧本、手册与资料</small><em>即将开放</em></button></div></section>
+    <section className="home-section knowledge-section"><div className="section-heading"><div><span className="eyebrow">准备工作</span><h2>知识库</h2></div><span>为后续 AI 辅助跑团预留</span></div><div className="knowledge-grid"><button type="button" className="knowledge-card" onClick={() => onOpenKnowledgeBase("knowledge")}><span className="knowledge-icon">✦</span><strong>知识库</strong><small>整理世界观、规则与设定</small><em>进入管理</em></button><button type="button" className="knowledge-card" onClick={() => onOpenKnowledgeBase("documents")}><span className="knowledge-icon">▤</span><strong>文档库</strong><small>集中保存剧本、手册与资料</small><em>进入管理</em></button></div></section>
     <section className="home-section rooms-section"><div className="section-heading"><div><span className="eyebrow">你的空间</span><h2>我的房间</h2></div><button type="button" className="text-action" onClick={onRefreshRooms}>{isLoadingRooms ? "读取中…" : "刷新"}</button></div><div className="room-columns"><RoomList title="我创建的" rooms={ownedRooms} emptyText="还没有创建房间" onOpenRoom={onOpenRoom} onRemoveRoom={onRemoveRoom} /><RoomList title="我加入的" rooms={joinedRooms} emptyText="还没有加入其他房间" onOpenRoom={onOpenRoom} onRemoveRoom={onRemoveRoom} /></div></section>
     {errorMessage && <p className="home-error" role="alert">{errorMessage}</p>}
     <p className="home-note">知识库与房间列表现在已预留独立入口；知识库内容和创建房间时绑定知识库会在 AI 功能阶段接入。</p>

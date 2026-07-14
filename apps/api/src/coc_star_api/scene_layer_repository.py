@@ -28,6 +28,10 @@ class SceneLayerRepository:
         model.height = layer.height
         model.z_index = layer.z_index
         model.visible = layer.visible
+        model.shape = layer.shape
+        model.image_fit = layer.image_fit
+        model.blur = layer.blur
+        model.opacity = layer.opacity
         await session.commit()
 
     async def delete(self, session: AsyncSession, scene_id: str, layer_id: str) -> None:
@@ -36,4 +40,4 @@ class SceneLayerRepository:
 
     @staticmethod
     def _to_domain(model: SceneLayerModel) -> SceneLayer:
-        return SceneLayer(model.layer_id, model.scene_id, model.layer_type, model.name, model.image_url, model.text, model.x, model.y, model.width, model.height, model.z_index, model.visible)
+        return SceneLayer(model.layer_id, model.scene_id, model.layer_type, model.name, model.image_url, model.text, model.x, model.y, model.width, model.height, model.z_index, model.visible, model.shape, model.image_fit, model.blur, model.opacity)

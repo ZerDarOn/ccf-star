@@ -44,3 +44,21 @@ async def initialize_database() -> None:
             face_column_names = {row[1] for row in face_columns}
             if "trigger" not in face_column_names:
                 await connection.execute(text('ALTER TABLE token_faces ADD COLUMN "trigger" VARCHAR(80)'))
+            layer_columns = await connection.execute(text("PRAGMA table_info(scene_layers)"))
+            layer_column_names = {row[1] for row in layer_columns}
+            for name, definition in (("shape", "VARCHAR(20) DEFAULT 'rectangle'"), ("image_fit", "VARCHAR(20) DEFAULT 'cover'"), ("blur", "FLOAT DEFAULT 0"), ("opacity", "FLOAT DEFAULT 1")):
+                if name not in layer_column_names:
+                    await connection.execute(text(f"ALTER TABLE scene_layers ADD COLUMN {name} {definition}"))
+            token_columns = await connection.execute(text("PRAGMA table_info(board_tokens)"))
+            token_column_names = {row[1] for row in token_columns}
+            if "shape" not in token_column_names:
+                await connection.execute(text("ALTER TABLE board_tokens ADD COLUMN shape VARCHAR(20) DEFAULT 'circle'"))
+            knowledge_base_columns = await connection.execute(text("PRAGMA table_info(knowledge_bases)"))
+            knowledge_base_column_names = {row[1] for row in knowledge_base_columns}
+            if "parent_id" not in knowledge_base_column_names:
+                await connection.execute(text("ALTER TABLE knowledge_bases ADD COLUMN parent_id VARCHAR(64)"))
+            document_columns = await connection.execute(text("PRAGMA table_info(knowledge_documents)"))
+            document_column_names = {row[1] for row in document_columns}
+            for name, definition in (("source_type", "VARCHAR(20) DEFAULT 'manual'"), ("source_name", "VARCHAR(255)"), ("mime_type", "VARCHAR(120)"), ("ai_enabled", "BOOLEAN DEFAULT 1")):
+                if name not in document_column_names:
+                    await connection.execute(text(f"ALTER TABLE knowledge_documents ADD COLUMN {name} {definition}"))

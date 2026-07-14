@@ -19,6 +19,7 @@ export interface ChatMessage {
   character_color?: string;
   tab_id?: string | null;
   show_dialogue?: boolean;
+  ai_avatar_url?: string | null;
 }
 
 export interface ChatTab {
@@ -38,6 +39,7 @@ export interface BoardToken {
   x: number;
   y: number;
   color: string;
+  shape: "circle" | "square";
   presentation?: TokenPresentation;
   faces?: TokenFace[];
 }
@@ -78,6 +80,10 @@ export interface SceneLayer {
   height: number;
   z_index: number;
   visible: boolean;
+  shape: "rectangle" | "square" | "circle";
+  image_fit: "cover" | "contain" | "fill";
+  blur: number;
+  opacity: number;
 }
 
 export type BgmSlot = "bgm01" | "bgm02";

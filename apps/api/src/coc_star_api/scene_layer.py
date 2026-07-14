@@ -15,6 +15,10 @@ class SceneLayer:
     height: float
     z_index: int
     visible: bool
+    shape: str = "rectangle"
+    image_fit: str = "cover"
+    blur: float = 0.0
+    opacity: float = 1.0
 
     def to_payload(self) -> dict[str, str | float | int | bool | None]:
         return {
@@ -30,4 +34,8 @@ class SceneLayer:
             "height": self.height,
             "z_index": self.z_index,
             "visible": self.visible,
+            "shape": self.shape,
+            "image_fit": self.image_fit,
+            "blur": self.blur,
+            "opacity": self.opacity,
         }

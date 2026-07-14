@@ -36,6 +36,7 @@ class BoardToken:
     x: float
     y: float
     color: str
+    shape: str = "circle"
 
     def to_payload(self) -> dict[str, str | float]:
         return {
@@ -45,6 +46,7 @@ class BoardToken:
             "x": self.x,
             "y": self.y,
             "color": self.color,
+            "shape": self.shape,
         }
 
 

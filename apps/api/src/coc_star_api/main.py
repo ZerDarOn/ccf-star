@@ -1,7 +1,11 @@
 import logging
+import time
+from io import BytesIO
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
 
 from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,9 +33,13 @@ from coc_star_api.user_repository import UserRepository
 from coc_star_api.passwords import PasswordHasher
 from coc_star_api.session_auth import InvalidSessionToken, SessionClaims, SessionTokenService
 from coc_star_api.settings import settings
+from coc_star_api.ai_provider import AiProviderError, complete
+from coc_star_api.ai_repository import AiRepository, decode_knowledge_base_ids, encode_knowledge_base_ids
+from coc_star_api.knowledge_repository import KnowledgeRepository
+from coc_star_api.models import AiProviderConfigModel, AiRunLogModel, KnowledgeBaseModel, KnowledgeDocumentModel, RoomAiConfigModel, RoomKnowledgeConfigModel
 
 app = FastAPI(title="coc-star API", version="0.1.0")
-asset_root = Path("uploads")
+asset_root = Path(settings.uploads_root).resolve()
 asset_root.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=asset_root), name="uploads")
 app.add_middleware(
@@ -39,7 +47,7 @@ app.add_middleware(
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_origin_regex=r"https://[a-z0-9-]+\.trycloudflare\.com",
     allow_credentials=False,
-    allow_methods=["DELETE", "GET", "POST"],
+    allow_methods=["DELETE", "GET", "POST", "PUT"],
     allow_headers=["Content-Type", "Authorization"],
 )
 room_manager = RoomManager()
@@ -50,6 +58,8 @@ scene_layer_repository = SceneLayerRepository()
 token_presentation_repository = TokenPresentationRepository()
 room_bgm_repository = RoomBgmRepository()
 room_chat_tab_repository = RoomChatTabRepository()
+ai_repository = AiRepository()
+knowledge_repository = KnowledgeRepository()
 user_repository = UserRepository()
 logger = logging.getLogger("coc-star.room")
 session_tokens = SessionTokenService(settings.session_secret)
@@ -71,6 +81,7 @@ class BoardTokenInput(BaseModel):
     x: float = Field(ge=0, le=1)
     y: float = Field(ge=0, le=1)
     color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+    shape: Literal["circle", "square"] = "circle"
 
 
 class RoomMemberRequest(BaseModel):
@@ -130,6 +141,10 @@ class SceneLayerRequest(BaseModel):
     height: float = Field(gt=0, le=2)
     z_index: int = Field(ge=-100, le=100)
     visible: bool = True
+    shape: Literal["rectangle", "square", "circle"] = "rectangle"
+    image_fit: Literal["cover", "contain", "fill"] = "cover"
+    blur: float = Field(default=0.0, ge=0, le=24)
+    opacity: float = Field(default=1.0, ge=0.05, le=1)
 
 
 class BgmTrackRequest(BaseModel):
@@ -151,6 +166,46 @@ class ChatTabRequest(BaseModel):
     show_dialogue: bool = False
 
 
+class AiProviderRequest(BaseModel):
+    provider_id: str | None = Field(default=None, max_length=64)
+    name: str = Field(min_length=1, max_length=80)
+    provider_type: str = Field(default="openai-compatible", max_length=40)
+    base_url: str = Field(min_length=1, max_length=2_048, pattern=r"^https?://")
+    model: str = Field(min_length=1, max_length=160)
+    api_key: str | None = Field(default=None, max_length=8_000)
+    enabled: bool = True
+
+
+class KnowledgeBaseRequest(BaseModel):
+    parent_id: str | None = Field(default=None, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+    kind: Literal["knowledge", "documents"] = "knowledge"
+
+
+class KnowledgeDocumentRequest(BaseModel):
+    document_id: str | None = Field(default=None, max_length=64)
+    title: str = Field(min_length=1, max_length=160)
+    content: str = Field(min_length=1, max_length=100_000)
+    category: str = Field(default="未分类", min_length=1, max_length=80)
+    ai_enabled: bool = True
+
+
+class RoomKnowledgeRequest(BaseModel):
+    knowledge_base_ids: list[str] = Field(default_factory=list, max_length=50)
+
+
+class RoomAiConfigRequest(BaseModel):
+    provider_id: str | None = Field(default=None, max_length=64)
+    enabled: bool = False
+    assistant_name: str = Field(default="星语", min_length=1, max_length=80)
+    system_prompt: str = Field(default="你是一个温和、有人情味的跑团助手。", max_length=8_000)
+    avatar_url: str | None = Field(default=None, max_length=2_048)
+    trigger_mode: Literal["mention", "main_channel", "all"] = "mention"
+    scene_context_enabled: bool = True
+    knowledge_base_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     await initialize_database()
@@ -170,6 +225,7 @@ async def startup() -> None:
             chat_tabs = await room_chat_tab_repository.ensure_defaults(session, room_id)
             room_manager.set_chat_tabs(room_id, chat_tabs)
     logger.info("database_initialized")
+    logger.info("persistent_storage_ready database=%s uploads=%s", settings.database_url, asset_root)
 
 
 @app.on_event("shutdown")
@@ -218,6 +274,211 @@ async def refresh_account(request: RefreshRequest) -> dict[str, str]:
     except InvalidAccountToken:
         raise HTTPException(status_code=401, detail="invalid_refresh_token") from None
     return account_tokens.issue_pair(AccountClaims(claims.user_id, claims.username, "access"))
+
+
+@app.get("/api/ai/providers")
+async def list_ai_providers(authorization: str | None = Header(default=None)) -> dict[str, list[dict[str, object]]]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        providers = await ai_repository.list_providers(session, account.user_id)
+    return {"providers": [ai_provider_payload(provider) for provider in providers]}
+
+
+@app.post("/api/ai/providers")
+async def save_ai_provider(request: AiProviderRequest, authorization: str | None = Header(default=None)) -> dict[str, object]:
+    account = require_account(authorization)
+    provider_id = request.provider_id or str(uuid4())
+    async with session_factory() as session:
+        current = await ai_repository.get_provider(session, provider_id, account.user_id)
+        api_key = request.api_key.strip() if request.api_key else (current.api_key if current else "")
+        if not api_key:
+            raise HTTPException(status_code=422, detail="api_key_required")
+        provider = AiProviderConfigModel(provider_id=provider_id, user_id=account.user_id, name=request.name.strip(), provider_type=request.provider_type, base_url=request.base_url.rstrip("/"), model=request.model.strip(), api_key=api_key, enabled=request.enabled)
+        await ai_repository.upsert_provider(session, provider)
+    logger.info("ai_provider_saved user_id=%s provider_id=%s", account.user_id, provider_id)
+    return {"provider": ai_provider_payload(provider)}
+
+
+@app.delete("/api/ai/providers/{provider_id}")
+async def delete_ai_provider(provider_id: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        if not await ai_repository.delete_provider(session, provider_id, account.user_id):
+            raise HTTPException(status_code=404, detail="provider_not_found")
+    logger.info("ai_provider_deleted user_id=%s provider_id=%s", account.user_id, provider_id)
+    return {"provider_id": provider_id}
+
+
+@app.get("/api/knowledge-bases")
+async def list_knowledge_bases(authorization: str | None = Header(default=None)) -> dict[str, list[dict[str, object]]]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        bases = await knowledge_repository.list_bases(session, account.user_id)
+        document_counts = await knowledge_repository.document_counts(session, [base.knowledge_base_id for base in bases])
+        payload = [knowledge_base_payload(base, document_counts.get(base.knowledge_base_id, 0)) for base in bases]
+    return {"knowledge_bases": payload}
+
+
+@app.post("/api/knowledge-bases")
+async def save_knowledge_base(request: KnowledgeBaseRequest, authorization: str | None = Header(default=None)) -> dict[str, object]:
+    account = require_account(authorization)
+    if request.parent_id:
+        async with session_factory() as session:
+            parent = await knowledge_repository.get_base(session, request.parent_id, account.user_id)
+            if parent is None:
+                raise HTTPException(status_code=404, detail="parent_knowledge_base_not_found")
+            if parent.kind != request.kind:
+                raise HTTPException(status_code=422, detail="parent_knowledge_base_kind_mismatch")
+    base = KnowledgeBaseModel(knowledge_base_id=str(uuid4()), user_id=account.user_id, parent_id=request.parent_id, name=request.name.strip(), description=request.description.strip(), kind=request.kind)
+    async with session_factory() as session:
+        await knowledge_repository.upsert_base(session, base)
+    logger.info("knowledge_base_created user_id=%s knowledge_base_id=%s kind=%s", account.user_id, base.knowledge_base_id, base.kind)
+    return {"knowledge_base": knowledge_base_payload(base, 0)}
+
+
+@app.get("/api/knowledge-bases/{base_id}/documents")
+async def list_knowledge_documents(base_id: str, authorization: str | None = Header(default=None)) -> dict[str, list[dict[str, object]]]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        if await knowledge_repository.get_base(session, base_id, account.user_id) is None:
+            raise HTTPException(status_code=404, detail="knowledge_base_not_found")
+        documents = await knowledge_repository.list_documents(session, base_id)
+    return {"documents": [knowledge_document_payload(document) for document in documents]}
+
+
+@app.post("/api/knowledge-bases/{base_id}/documents")
+async def save_knowledge_document(base_id: str, request: KnowledgeDocumentRequest, authorization: str | None = Header(default=None)) -> dict[str, object]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        if await knowledge_repository.get_base(session, base_id, account.user_id) is None:
+            raise HTTPException(status_code=404, detail="knowledge_base_not_found")
+        existing = await knowledge_repository.get_document(session, request.document_id) if request.document_id else None
+        if existing is not None and existing.knowledge_base_id != base_id:
+            raise HTTPException(status_code=403, detail="document_forbidden")
+        document = KnowledgeDocumentModel(document_id=request.document_id or str(uuid4()), knowledge_base_id=base_id, title=request.title.strip(), content=request.content.strip(), category=request.category.strip(), ai_enabled=request.ai_enabled)
+        await knowledge_repository.upsert_document(session, document)
+    logger.info("knowledge_document_saved user_id=%s document_id=%s knowledge_base_id=%s action=%s", account.user_id, document.document_id, base_id, "updated" if request.document_id else "created")
+    return {"document": knowledge_document_payload(document)}
+
+
+@app.post("/api/knowledge-bases/{base_id}/files")
+async def import_knowledge_file(base_id: str, request: Request, authorization: str | None = Header(default=None)) -> dict[str, object]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        if await knowledge_repository.get_base(session, base_id, account.user_id) is None:
+            raise HTTPException(status_code=404, detail="knowledge_base_not_found")
+    content = await request.body()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="knowledge_file_too_large")
+    source_name = request.headers.get("x-file-name", "imported.txt")
+    extension = Path(source_name).suffix.lower()
+    supported_extensions = {".txt", ".md", ".markdown", ".json", ".csv", ".yaml", ".yml", ".xml", ".docx"}
+    if extension not in supported_extensions:
+        raise HTTPException(status_code=415, detail="unsupported_knowledge_file")
+    try:
+        if extension == ".docx":
+            with ZipFile(BytesIO(content)) as archive:
+                document_xml = archive.read("word/document.xml")
+            root = ElementTree.fromstring(document_xml)
+            paragraphs = []
+            for paragraph in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
+                text = "".join(node.text or "" for node in paragraph.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"))
+                if text.strip():
+                    paragraphs.append(text)
+            text_content = "\n".join(paragraphs)
+        else:
+            text_content = content.decode("utf-8-sig")
+    except (BadZipFile, KeyError, ElementTree.ParseError, UnicodeDecodeError):
+        raise HTTPException(status_code=415, detail="knowledge_file_cannot_be_read") from None
+    if not text_content.strip():
+        raise HTTPException(status_code=422, detail="knowledge_file_is_empty")
+    if len(text_content) > 100_000:
+        raise HTTPException(status_code=413, detail="knowledge_file_text_too_large")
+    document = KnowledgeDocumentModel(document_id=str(uuid4()), knowledge_base_id=base_id, title=Path(source_name).stem[:160] or "导入文档", content=text_content, category=extension.lstrip(".") or "file", source_type="file", source_name=source_name[:255], mime_type=request.headers.get("content-type"), ai_enabled=True)
+    async with session_factory() as session:
+        await knowledge_repository.upsert_document(session, document)
+    logger.info("knowledge_file_imported user_id=%s knowledge_base_id=%s document_id=%s filename=%s", account.user_id, base_id, document.document_id, source_name)
+    return {"document": knowledge_document_payload(document)}
+
+
+@app.delete("/api/knowledge-bases/{base_id}/documents/{document_id}")
+async def delete_knowledge_document(base_id: str, document_id: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        if await knowledge_repository.get_base(session, base_id, account.user_id) is None:
+            raise HTTPException(status_code=404, detail="knowledge_base_not_found")
+        document = await knowledge_repository.get_document(session, document_id)
+        if document is None or document.knowledge_base_id != base_id:
+            raise HTTPException(status_code=404, detail="document_not_found")
+        await knowledge_repository.delete_document(session, document_id)
+    logger.info("knowledge_document_deleted user_id=%s document_id=%s knowledge_base_id=%s", account.user_id, document_id, base_id)
+    return {"document_id": document_id}
+
+
+@app.delete("/api/knowledge-bases/{base_id}")
+async def delete_knowledge_base(base_id: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        deleted_ids = await knowledge_repository.delete_base(session, base_id, account.user_id)
+        if deleted_ids is None:
+            raise HTTPException(status_code=404, detail="knowledge_base_not_found")
+    logger.info("knowledge_base_deleted user_id=%s knowledge_base_id=%s descendants=%s", account.user_id, base_id, len(deleted_ids) - 1)
+    return {"knowledge_base_id": base_id}
+
+
+@app.get("/api/rooms/{room_id}/knowledge")
+async def get_room_knowledge(room_id: str, authorization: str | None = Header(default=None)) -> dict[str, list[str]]:
+    account = require_account(authorization)
+    await require_room_member(room_id, account.user_id)
+    async with session_factory() as session:
+        config = await knowledge_repository.get_room_config(session, room_id)
+    return {"knowledge_base_ids": decode_knowledge_base_ids(config.knowledge_base_ids) if config else []}
+
+
+@app.put("/api/rooms/{room_id}/knowledge")
+async def save_room_knowledge(room_id: str, request: RoomKnowledgeRequest, authorization: str | None = Header(default=None)) -> dict[str, list[str]]:
+    account = require_account(authorization)
+    await require_room_gm(room_id, account.user_id)
+    async with session_factory() as session:
+        bases = await knowledge_repository.list_bases(session, account.user_id)
+        allowed_ids = {base.knowledge_base_id for base in bases}
+        if not set(request.knowledge_base_ids).issubset(allowed_ids):
+            raise HTTPException(status_code=403, detail="knowledge_base_forbidden")
+        config = RoomKnowledgeConfigModel(room_id=room_id, knowledge_base_ids=encode_knowledge_base_ids(request.knowledge_base_ids))
+        await knowledge_repository.upsert_room_config(session, config)
+    logger.info("room_knowledge_mounted room_id=%s user_id=%s count=%s", room_id, account.user_id, len(request.knowledge_base_ids))
+    return {"knowledge_base_ids": request.knowledge_base_ids}
+
+
+@app.get("/api/rooms/{room_id}/ai")
+async def get_room_ai_config(room_id: str, authorization: str | None = Header(default=None)) -> dict[str, object]:
+    account = require_account(authorization)
+    await require_room_member(room_id, account.user_id)
+    async with session_factory() as session:
+        config = await ai_repository.get_room_config(session, room_id)
+    return {"config": ai_room_config_payload(config)}
+
+
+@app.put("/api/rooms/{room_id}/ai")
+async def save_room_ai_config(room_id: str, request: RoomAiConfigRequest, authorization: str | None = Header(default=None)) -> dict[str, object]:
+    account = require_account(authorization)
+    await require_room_gm(room_id, account.user_id)
+    async with session_factory() as session:
+        if request.provider_id and await ai_repository.get_provider(session, request.provider_id, account.user_id) is None:
+            raise HTTPException(status_code=404, detail="provider_not_found")
+        config = RoomAiConfigModel(room_id=room_id, provider_id=request.provider_id, enabled=request.enabled, assistant_name=request.assistant_name.strip(), system_prompt=request.system_prompt.strip(), avatar_url=request.avatar_url, trigger_mode=request.trigger_mode, scene_context_enabled=request.scene_context_enabled, knowledge_base_ids=encode_knowledge_base_ids(request.knowledge_base_ids))
+        await ai_repository.upsert_room_config(session, config)
+    logger.info("room_ai_config_saved room_id=%s user_id=%s enabled=%s", room_id, account.user_id, request.enabled)
+    return {"config": ai_room_config_payload(config)}
+
+
+@app.get("/api/rooms/{room_id}/ai/logs")
+async def list_room_ai_logs(room_id: str, authorization: str | None = Header(default=None)) -> dict[str, list[dict[str, object]]]:
+    account = require_account(authorization)
+    await require_room_gm(room_id, account.user_id)
+    async with session_factory() as session:
+        logs = await ai_repository.list_logs(session, room_id)
+    return {"logs": [ai_log_payload(log) for log in logs]}
 
 
 @app.post("/api/rooms")
@@ -511,6 +772,7 @@ async def room_socket(websocket: WebSocket, room_id: str) -> None:
                 },
             )
             logger.info("chat_message_broadcast room_id=%s user_id=%s", room_id, user_id)
+            await maybe_run_room_ai(room_id, member, chat_tab, visible_text)
     except WebSocketDisconnect:
         logger.info("room_connection_closed room_id=%s user_id=%s", room_id, user_id)
     except Exception:
@@ -560,6 +822,80 @@ def require_account(authorization: str | None) -> AccountClaims:
         raise HTTPException(status_code=401, detail="invalid_account_token") from None
 
 
+async def require_room_member(room_id: str, user_id: str) -> object:
+    async with session_factory() as session:
+        member = await room_repository.get_member(session, room_id, user_id)
+    if member is None:
+        raise HTTPException(status_code=403, detail="room_membership_required")
+    return member
+
+
+async def require_room_gm(room_id: str, user_id: str) -> object:
+    member = await require_room_member(room_id, user_id)
+    if member.role != "gm":
+        raise HTTPException(status_code=403, detail="gm_required")
+    return member
+
+
+def ai_provider_payload(provider: AiProviderConfigModel) -> dict[str, object]:
+    masked = f"{provider.api_key[:4]}••••{provider.api_key[-4:]}" if len(provider.api_key) >= 8 else "••••"
+    return {"provider_id": provider.provider_id, "name": provider.name, "provider_type": provider.provider_type, "base_url": provider.base_url, "model": provider.model, "api_key_masked": masked, "enabled": provider.enabled}
+
+
+def knowledge_base_payload(base: KnowledgeBaseModel, document_count: int) -> dict[str, object]:
+    return {"knowledge_base_id": base.knowledge_base_id, "parent_id": base.parent_id, "name": base.name, "description": base.description, "kind": base.kind, "document_count": document_count, "created_at": base.created_at.isoformat() if base.created_at else None}
+
+
+def knowledge_document_payload(document: KnowledgeDocumentModel) -> dict[str, object]:
+    return {"document_id": document.document_id, "knowledge_base_id": document.knowledge_base_id, "title": document.title, "content": document.content, "category": document.category, "source_type": document.source_type, "source_name": document.source_name, "mime_type": document.mime_type, "ai_enabled": document.ai_enabled, "created_at": document.created_at.isoformat() if document.created_at else None, "updated_at": document.updated_at.isoformat() if document.updated_at else None}
+
+
+def ai_room_config_payload(config: RoomAiConfigModel | None) -> dict[str, object]:
+    if config is None:
+        return {"room_id": None, "provider_id": None, "enabled": False, "assistant_name": "星语", "system_prompt": "你是一个温和、有人情味的跑团助手。", "avatar_url": None, "trigger_mode": "mention", "scene_context_enabled": True, "knowledge_base_ids": []}
+    return {"room_id": config.room_id, "provider_id": config.provider_id, "enabled": config.enabled, "assistant_name": config.assistant_name, "system_prompt": config.system_prompt, "avatar_url": config.avatar_url, "trigger_mode": config.trigger_mode, "scene_context_enabled": config.scene_context_enabled, "knowledge_base_ids": decode_knowledge_base_ids(config.knowledge_base_ids)}
+
+
+def ai_log_payload(log: AiRunLogModel) -> dict[str, object]:
+    return {"log_id": log.log_id, "room_id": log.room_id, "user_id": log.user_id, "event_type": log.event_type, "status": log.status, "request_summary": log.request_summary, "response_summary": log.response_summary, "latency_ms": log.latency_ms, "created_at": log.created_at.isoformat() if log.created_at else None}
+
+
+async def maybe_run_room_ai(room_id: str, member: RoomMember, chat_tab: RoomChatTab | None, text: str) -> None:
+    async with session_factory() as session:
+        config = await ai_repository.get_room_config(session, room_id)
+        if config is None or not config.enabled:
+            return
+        should_run = config.trigger_mode == "all" or (config.trigger_mode == "main_channel" and chat_tab and chat_tab.tab_type == "main") or (config.trigger_mode == "mention" and (text.startswith("@") or text.startswith("#")))
+        if not should_run:
+            return
+        provider = await session.get(AiProviderConfigModel, config.provider_id) if config.provider_id else None
+        if provider is None or not provider.enabled:
+            await ai_repository.add_log(session, AiRunLogModel(log_id=str(uuid4()), room_id=room_id, user_id=member.user_id, event_type="chat_completion", status="skipped", request_summary="未配置可用的 AI 厂商", response_summary="", latency_ms=0))
+            return
+        room_knowledge = await knowledge_repository.get_room_config(session, room_id)
+        documents = []
+        mounted_ids = decode_knowledge_base_ids(room_knowledge.knowledge_base_ids) if room_knowledge else []
+        for base_id in mounted_ids:
+            documents.extend(await knowledge_repository.list_documents(session, base_id))
+        scene = room_manager.active_scene(room_id)
+    prompt_text = text.lstrip("@#").strip() if config.trigger_mode == "mention" else text
+    knowledge_context = "\n".join(f"[{document.category}] {document.title}: {document.content[:2_000]}" for document in documents if document.ai_enabled)[:16_000]
+    scene_context = f"当前场景：{scene.name}" if config.scene_context_enabled and scene else ""
+    messages = [{"role": "system", "content": config.system_prompt}, {"role": "system", "content": f"{scene_context}\n参考资料：\n{knowledge_context}"}, {"role": "user", "content": prompt_text}]
+    started = time.perf_counter()
+    try:
+        reply = await complete(provider.base_url, provider.api_key, provider.model, messages)
+    except AiProviderError as error:
+        async with session_factory() as session:
+            await ai_repository.add_log(session, AiRunLogModel(log_id=str(uuid4()), room_id=room_id, user_id=member.user_id, event_type="chat_completion", status="failed", request_summary=prompt_text[:500], response_summary=str(error), latency_ms=int((time.perf_counter() - started) * 1000)))
+        logger.exception("ai_completion_failed room_id=%s user_id=%s", room_id, member.user_id)
+        return
+    async with session_factory() as session:
+        await ai_repository.add_log(session, AiRunLogModel(log_id=str(uuid4()), room_id=room_id, user_id=member.user_id, event_type="chat_completion", status="succeeded", request_summary=prompt_text[:500], response_summary=reply.text[:500], latency_ms=int((time.perf_counter() - started) * 1000)))
+    await room_manager.broadcast(room_id, {"type": "chat.message", "message": {"message_id": str(uuid4()), "user_id": "ai", "display_name": config.assistant_name, "character_name": config.assistant_name, "character_color": "#9ec5ff", "tab_id": chat_tab.tab_id if chat_tab else None, "show_dialogue": True, "text": reply.text, "token_id": None, "face_id": None, "ai_avatar_url": config.avatar_url}})
+    logger.info("ai_completion_succeeded room_id=%s model=%s latency_ms=%s", room_id, reply.model, int((time.perf_counter() - started) * 1000))
+
+
 async def handle_token_upsert(
     websocket: WebSocket,
     room_id: str,
@@ -584,6 +920,7 @@ async def handle_token_upsert(
         x=token_input.x,
         y=token_input.y,
         color=token_input.color,
+        shape=current_token.shape if current_token else token_input.shape,
     )
     try:
         async with session_factory() as session:
@@ -891,6 +1228,10 @@ async def handle_scene_layer_upsert(
         height=request.height,
         z_index=request.z_index,
         visible=request.visible,
+        shape=request.shape,
+        image_fit=request.image_fit,
+        blur=request.blur,
+        opacity=request.opacity,
     )
     try:
         async with session_factory() as session:
