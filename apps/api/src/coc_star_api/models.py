@@ -35,6 +35,7 @@ class TokenFaceModel(Base):
     face_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     token_id: Mapped[str] = mapped_column(String(64), index=True)
     label: Mapped[str] = mapped_column(String(80))
+    trigger: Mapped[str | None] = mapped_column(String(80), nullable=True)
     image_url: Mapped[str] = mapped_column(String(2_048))
 
 
@@ -43,6 +44,7 @@ class RoomModel(Base):
 
     room_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     name: Mapped[str] = mapped_column(String(120))
+    owner_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

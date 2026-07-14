@@ -37,8 +37,9 @@ app.mount("/uploads", StaticFiles(directory=asset_root), name="uploads")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origin_regex=r"https://[a-z0-9-]+\.trycloudflare\.com",
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["DELETE", "GET", "POST"],
     allow_headers=["Content-Type", "Authorization"],
 )
 room_manager = RoomManager()
@@ -112,6 +113,7 @@ class TokenFaceRequest(BaseModel):
     token_id: str = Field(min_length=1, max_length=64)
     face_id: str | None = Field(default=None, max_length=64)
     label: str = Field(min_length=1, max_length=80)
+    trigger: str | None = Field(default=None, max_length=80)
     image_url: str = Field(min_length=1, max_length=2_048)
 
 
@@ -246,7 +248,8 @@ async def join_room(room_id: str, request: RoomMemberRequest, authorization: str
         async with session_factory() as session:
             if not await room_repository.exists(session, room_id):
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="room_not_found")
-            member = SessionClaims(account.user_id, room_id, request.display_name, "player")
+            existing_member = await room_repository.get_member(session, room_id, account.user_id)
+            member = SessionClaims(account.user_id, room_id, request.display_name, existing_member.role if existing_member else "player")
             await room_repository.add_member(session, room_id, member.user_id, member.display_name, member.role)
     except SQLAlchemyError:
         logger.exception("room_join_persistence_failed room_id=%s", room_id)
@@ -255,6 +258,39 @@ async def join_room(room_id: str, request: RoomMemberRequest, authorization: str
         room_manager.create_room(room_id)
     logger.info("room_join_token_issued room_id=%s user_id=%s", room_id, member.user_id)
     return {"room_id": room_id, "access_token": session_tokens.issue(member), "member": member_payload(member)}
+
+
+@app.get("/api/rooms")
+async def list_my_rooms(authorization: str | None = Header(default=None)) -> dict[str, list[dict[str, object]]]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        room_rows = await room_repository.list_for_user(session, account.user_id)
+    rooms = [
+        {
+            "room_id": room.room_id,
+            "name": room.name,
+            "role": member.role,
+            "is_owner": room.owner_user_id == account.user_id,
+            "display_name": member.display_name,
+            "created_at": room.created_at.isoformat() if room.created_at else None,
+        }
+        for room, member in room_rows
+    ]
+    logger.info("room_listed user_id=%s count=%s", account.user_id, len(rooms))
+    return {"rooms": rooms}
+
+
+@app.delete("/api/rooms/{room_id}")
+async def remove_my_room(room_id: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        action = await room_repository.remove_for_user(session, room_id, account.user_id)
+    if action is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="room_membership_not_found")
+    if action == "deleted":
+        room_manager.remove_room(room_id)
+    logger.info("room_removed room_id=%s user_id=%s action=%s", room_id, account.user_id, action)
+    return {"action": action, "room_id": room_id}
 
 
 @app.post("/api/rooms/{room_id}/assets")
@@ -641,7 +677,12 @@ async def handle_token_face_upsert(
     if not await can_edit_token(room_id, actor, request.token_id):
         await websocket.send_json({"type": "error", "code": "token_edit_forbidden"})
         return
-    face = TokenFace(request.face_id or str(uuid4()), request.token_id, request.label.strip(), request.image_url)
+    label = request.label.strip()
+    trigger = (request.trigger or label).strip()
+    if not trigger:
+        await websocket.send_json({"type": "error", "code": "invalid_token_face_trigger"})
+        return
+    face = TokenFace(request.face_id or str(uuid4()), request.token_id, label, request.image_url, trigger)
     try:
         async with session_factory() as session:
             await token_presentation_repository.upsert_face(session, face)

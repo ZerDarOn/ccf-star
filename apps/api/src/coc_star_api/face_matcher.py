@@ -12,8 +12,11 @@ class FaceMatch:
 def match_face(text: str, faces: list[TokenFace]) -> FaceMatch:
     candidates: list[tuple[str, TokenFace]] = []
     for face in faces:
+        trigger = (face.trigger or face.label).strip()
+        if not trigger:
+            continue
         for prefix in ("#", "@"):
-            marker = f"{prefix}{face.label}"
+            marker = f"{prefix}{trigger}"
             if text.endswith(marker):
                 candidates.append((marker, face))
     if not candidates:

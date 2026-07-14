@@ -25,6 +25,7 @@ class TokenFace:
     token_id: str
     label: str
     image_url: str
+    trigger: str | None = None
 
     def to_payload(self) -> dict[str, str]:
         return {
@@ -32,4 +33,5 @@ class TokenFace:
             "token_id": self.token_id,
             "label": self.label,
             "image_url": self.image_url,
+            "trigger": self.trigger or self.label,
         }

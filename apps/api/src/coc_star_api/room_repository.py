@@ -1,7 +1,7 @@
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coc_star_api.models import RoomMemberModel, RoomModel
+from coc_star_api.models import BoardTokenModel, RoomBgmModel, RoomChatTabModel, RoomMemberModel, RoomModel, RoomSceneModel, SceneLayerModel, TokenFaceModel, TokenPresentationModel
 
 
 class RoomRepository:
@@ -11,6 +11,40 @@ class RoomRepository:
 
     async def exists(self, session: AsyncSession, room_id: str) -> bool:
         return await session.get(RoomModel, room_id) is not None
+
+    async def list_for_user(self, session: AsyncSession, user_id: str) -> list[tuple[RoomModel, RoomMemberModel]]:
+        result = await session.execute(
+            select(RoomModel, RoomMemberModel)
+            .join(RoomMemberModel, RoomMemberModel.room_id == RoomModel.room_id)
+            .where(RoomMemberModel.user_id == user_id)
+            .order_by(RoomModel.created_at.desc(), RoomModel.room_id)
+        )
+        return list(result.all())
+
+    async def remove_for_user(self, session: AsyncSession, room_id: str, user_id: str) -> str | None:
+        room = await session.get(RoomModel, room_id)
+        member = await session.get(RoomMemberModel, (room_id, user_id))
+        if room is None or member is None:
+            return None
+        if room.owner_user_id != user_id:
+            await session.delete(member)
+            await session.commit()
+            return "left"
+        scene_ids = list(await session.scalars(select(RoomSceneModel.scene_id).where(RoomSceneModel.room_id == room_id)))
+        token_ids = list(await session.scalars(select(BoardTokenModel.token_id).where(BoardTokenModel.room_id == room_id)))
+        if scene_ids:
+            await session.execute(delete(SceneLayerModel).where(SceneLayerModel.scene_id.in_(scene_ids)))
+        if token_ids:
+            await session.execute(delete(TokenFaceModel).where(TokenFaceModel.token_id.in_(token_ids)))
+            await session.execute(delete(TokenPresentationModel).where(TokenPresentationModel.token_id.in_(token_ids)))
+        await session.execute(delete(RoomSceneModel).where(RoomSceneModel.room_id == room_id))
+        await session.execute(delete(RoomChatTabModel).where(RoomChatTabModel.room_id == room_id))
+        await session.execute(delete(RoomBgmModel).where(RoomBgmModel.room_id == room_id))
+        await session.execute(delete(BoardTokenModel).where(BoardTokenModel.room_id == room_id))
+        await session.execute(delete(RoomMemberModel).where(RoomMemberModel.room_id == room_id))
+        await session.delete(room)
+        await session.commit()
+        return "deleted"
 
     async def get_member(self, session: AsyncSession, room_id: str, user_id: str) -> RoomMemberModel | None:
         return await session.get(RoomMemberModel, (room_id, user_id))
@@ -27,7 +61,7 @@ class RoomRepository:
         user_id: str,
         display_name: str,
     ) -> None:
-        session.add(RoomModel(room_id=room_id, name=name))
+        session.add(RoomModel(room_id=room_id, name=name, owner_user_id=user_id))
         session.add(RoomMemberModel(room_id=room_id, user_id=user_id, display_name=display_name, role="gm"))
         await session.commit()
 

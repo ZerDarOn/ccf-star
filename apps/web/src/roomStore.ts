@@ -55,6 +55,7 @@ export interface TokenFace {
   token_id: string;
   label: string;
   image_url: string;
+  trigger?: string;
 }
 
 export interface RoomScene {

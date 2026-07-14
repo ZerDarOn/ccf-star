@@ -21,3 +21,12 @@ def test_face_match_supports_ccfolia_style_at_command() -> None:
 
     assert result.face == face
     assert result.visible_text == ""
+
+
+def test_face_match_uses_independent_trigger_instead_of_display_label() -> None:
+    face = TokenFace("f1", "t1", "悲伤表情", "/uploads/sad.png", "sad")
+
+    result = match_face("今天有点低落 #sad", [face])
+
+    assert result.face == face
+    assert result.visible_text == "今天有点低落"

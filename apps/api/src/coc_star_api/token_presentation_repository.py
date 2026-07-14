@@ -36,6 +36,7 @@ class TokenPresentationRepository:
             session.add(model)
         model.token_id = face.token_id
         model.label = face.label
+        model.trigger = face.trigger or face.label
         model.image_url = face.image_url
         await session.commit()
 
@@ -49,4 +50,4 @@ class TokenPresentationRepository:
 
     @staticmethod
     def _to_face(model: TokenFaceModel) -> TokenFace:
-        return TokenFace(model.face_id, model.token_id, model.label, model.image_url)
+        return TokenFace(model.face_id, model.token_id, model.label, model.image_url, model.trigger or model.label)

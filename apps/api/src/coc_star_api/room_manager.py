@@ -83,6 +83,18 @@ class RoomManager:
     def has_room(self, room_id: str) -> bool:
         return room_id in self._known_rooms
 
+    def remove_room(self, room_id: str) -> None:
+        self._known_rooms.discard(room_id)
+        self._rooms.pop(room_id, None)
+        self._boards.pop(room_id, None)
+        self._presentations.pop(room_id, None)
+        self._faces.pop(room_id, None)
+        self._scenes.pop(room_id, None)
+        self._active_scenes.pop(room_id, None)
+        self._scene_layers.pop(room_id, None)
+        self._bgm_playback.pop(room_id, None)
+        self._chat_tabs.pop(room_id, None)
+
     def members(self, room_id: str) -> list[RoomMember]:
         room = self._rooms.get(room_id, {})
         return [connection.member for connection in room.values()]
