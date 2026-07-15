@@ -55,6 +55,10 @@ async def initialize_database() -> None:
                 await connection.execute(text("ALTER TABLE board_tokens ADD COLUMN shape VARCHAR(20) DEFAULT 'circle'"))
             if "character_id" not in token_column_names:
                 await connection.execute(text("ALTER TABLE board_tokens ADD COLUMN character_id VARCHAR(64)"))
+            scene_columns = await connection.execute(text("PRAGMA table_info(room_scenes)"))
+            scene_column_names = {row[1] for row in scene_columns}
+            if "background_blur" not in scene_column_names:
+                await connection.execute(text("ALTER TABLE room_scenes ADD COLUMN background_blur FLOAT DEFAULT 0"))
             knowledge_base_columns = await connection.execute(text("PRAGMA table_info(knowledge_bases)"))
             knowledge_base_column_names = {row[1] for row in knowledge_base_columns}
             if "parent_id" not in knowledge_base_column_names:
@@ -64,3 +68,7 @@ async def initialize_database() -> None:
             for name, definition in (("source_type", "VARCHAR(20) DEFAULT 'manual'"), ("source_name", "VARCHAR(255)"), ("mime_type", "VARCHAR(120)"), ("ai_enabled", "BOOLEAN DEFAULT 1")):
                 if name not in document_column_names:
                     await connection.execute(text(f"ALTER TABLE knowledge_documents ADD COLUMN {name} {definition}"))
+            asset_columns = await connection.execute(text("PRAGMA table_info(room_assets)"))
+            asset_column_names = {row[1] for row in asset_columns}
+            if "category" not in asset_column_names:
+                await connection.execute(text("ALTER TABLE room_assets ADD COLUMN category VARCHAR(40) DEFAULT 'general'"))

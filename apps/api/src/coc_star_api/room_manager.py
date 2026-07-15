@@ -58,12 +58,14 @@ class RoomScene:
     name: str
     background_url: str
     is_active: bool = False
+    background_blur: float = 0.0
 
     def to_payload(self) -> dict[str, str | bool]:
         return {
             "scene_id": self.scene_id,
             "name": self.name,
             "background_url": self.background_url,
+            "background_blur": self.background_blur,
             "is_active": self.is_active,
         }
 

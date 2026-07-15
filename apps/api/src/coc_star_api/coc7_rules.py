@@ -32,9 +32,19 @@ SKILL_ALIASES: dict[str, str] = {
     "母语": "language_own", "法律": "law", "图书馆": "library_use", "图书馆使用": "library_use", "聆听": "listen", "开锁": "locksmith", "撬锁": "locksmith", "锁匠": "locksmith",
     "机械维修": "mech_repair", "医学": "medicine", "博物学": "natural_world", "自然学": "natural_world", "领航": "navigate", "导航": "navigate", "神秘学": "occult",
     "重型操作": "operate_heavy_machinery", "重型机械": "operate_heavy_machinery", "操作重型机械": "operate_heavy_machinery", "重型": "operate_heavy_machinery", "说服": "persuade",
-    "精神分析": "psychoanalysis", "心理学": "psychology", "骑术": "ride", "妙手": "sleight_of_hand", "侦查": "spot_hidden", "潜行": "stealth", "生存": "survival",
+    "精神分析": "psychoanalysis", "心理学": "psychology", "骑术": "ride", "妙手": "sleight_of_hand", "侦查": "spot_hidden", "侦察": "spot_hidden", "观察": "spot_hidden", "观察力": "spot_hidden", "察觉": "spot_hidden", "搜查": "spot_hidden", "潜行": "stealth", "生存": "survival",
     "游泳": "swim", "投掷": "throw", "追踪": "track", "驯兽": "animal_handling", "潜水": "diving", "爆破": "demolitions", "读唇": "lip_reading", "催眠": "hypnosis", "炮术": "artillery",
 }
+
+# Keep common Chinese input-method variants in ASCII-escaped form so source-file encoding cannot drop them.
+SKILL_ALIASES.update({
+    "\u4fa6\u5bdf": "spot_hidden",
+    "\u4fa6\u67e5": "spot_hidden",
+    "\u89c2\u5bdf": "spot_hidden",
+    "\u89c2\u5bdf\u529b": "spot_hidden",
+    "\u5bdf\u89c9": "spot_hidden",
+    "\u641c\u67e5": "spot_hidden",
+})
 ALL_ALIASES = sorted({*ATTRIBUTE_ALIASES, *RESOURCE_ALIASES, *SKILL_ALIASES}, key=len, reverse=True)
 
 
@@ -43,11 +53,13 @@ def canonical_skill_id(name: str) -> str | None:
 
 
 def canonical_check_target(name: str) -> tuple[Literal["attribute", "skill"], str] | None:
-    normalized = name.strip()
+    normalized = "".join(name.strip().split())
     if normalized in ATTRIBUTE_ALIASES:
         return "attribute", ATTRIBUTE_ALIASES[normalized]
     if normalized in SKILL_ALIASES:
         return "skill", SKILL_ALIASES[normalized]
+    if normalized in SKILL_ALIASES.values():
+        return "skill", normalized
     return None
 
 

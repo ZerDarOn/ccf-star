@@ -12,6 +12,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocke
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import ClientDisconnect
 
@@ -19,7 +20,7 @@ from coc_star_api.room_manager import BoardToken, RoomConnection, RoomManager, R
 from coc_star_api.board_repository import BoardTokenRepository
 from coc_star_api.account_auth import AccountClaims, AccountTokenService, InvalidAccountToken
 from coc_star_api.database import engine, initialize_database, session_factory
-from coc_star_api.dice_roller import InvalidDiceExpression, roll_dice
+from coc_star_api.dice_roller import InvalidDiceExpression, roll_coc_percentile, roll_dice
 from coc_star_api.face_matcher import match_face
 from coc_star_api.room_repository import RoomRepository
 from coc_star_api.scene_repository import SceneRepository
@@ -40,7 +41,7 @@ from coc_star_api.ai_repository import AiRepository, decode_knowledge_base_ids, 
 from coc_star_api.coc7_rules import canonical_check_target, derive_stats, parse_st, resolve_check
 from coc_star_api.character_repository import CharacterRepository, decode_sheet, encode_sheet
 from coc_star_api.knowledge_repository import KnowledgeRepository
-from coc_star_api.models import AiProviderConfigModel, AiRunLogModel, CharacterLibraryModel, KnowledgeBaseModel, KnowledgeDocumentModel, RoomAiConfigModel, RoomCharacterModel, RoomKnowledgeConfigModel
+from coc_star_api.models import AiProviderConfigModel, AiRunLogModel, CharacterLibraryModel, KnowledgeBaseModel, KnowledgeDocumentModel, RoomAiConfigModel, RoomAssetModel, RoomCharacterModel, RoomKnowledgeConfigModel
 
 app = FastAPI(title="coc-star API", version="0.1.0")
 asset_root = Path(settings.uploads_root).resolve()
@@ -52,7 +53,7 @@ app.add_middleware(
     allow_origin_regex=r"https://[a-z0-9-]+\.trycloudflare\.com",
     allow_credentials=False,
     allow_methods=["DELETE", "GET", "POST", "PUT"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-File-Name"],
 )
 room_manager = RoomManager()
 board_repository = BoardTokenRepository()
@@ -78,6 +79,7 @@ class ChatMessage(BaseModel):
     tab_id: str | None = Field(default=None, max_length=128)
     character_name: str | None = Field(default=None, max_length=40)
     character_color: str = Field(default="#d7b56d", pattern=r"^#[0-9a-fA-F]{6}$")
+    roll_mode: Literal["normal", "bonus", "penalty"] = "normal"
 
 
 class BoardTokenInput(BaseModel):
@@ -115,11 +117,18 @@ class RefreshRequest(BaseModel):
 
 class SceneRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    background_url: str = Field(default="", max_length=2_048, pattern=r"^$|^https?://")
+    background_url: str = Field(default="", max_length=2_048, pattern=r"^$|^https?://|^/uploads/")
+    background_blur: float = Field(default=0.0, ge=0, le=24)
 
 
 class SceneActivationRequest(BaseModel):
     scene_id: str = Field(min_length=1, max_length=128)
+
+
+class SceneUpdateRequest(BaseModel):
+    scene_id: str = Field(min_length=1, max_length=128)
+    background_url: str = Field(default="", max_length=2_048, pattern=r"^$|^https?://|^/uploads/")
+    background_blur: float = Field(default=0.0, ge=0, le=24)
 
 
 class TokenPresentationRequest(BaseModel):
@@ -678,6 +687,9 @@ async def upload_room_asset(room_id: str, request: Request, authorization: str |
         "audio/ogg": ".ogg",
         "audio/wav": ".wav",
         "audio/x-wav": ".wav",
+        "audio/wave": ".wav",
+        "audio/vnd.wave": ".wav",
+        "audio/x-pn-wav": ".wav",
         "audio/mp4": ".m4a",
         "audio/aac": ".aac",
         "audio/flac": ".flac",
@@ -693,8 +705,28 @@ async def upload_room_asset(room_id: str, request: Request, authorization: str |
         raise HTTPException(status_code=413, detail="asset_too_large")
     filename = f"{uuid4().hex}{extension}"
     (asset_root / filename).write_bytes(content)
-    logger.info("room_asset_uploaded room_id=%s user_id=%s filename=%s", room_id, account.user_id, filename)
-    return {"url": f"/uploads/{filename}", "content_type": content_type}
+    asset_id = str(uuid4())
+    original_name = request.headers.get("x-file-name", "").strip().replace("/", "_").replace("\\", "_")
+    asset_name = original_name[:160] or filename
+    kind = "audio" if content_type.startswith("audio/") else "image"
+    category = request.headers.get("x-asset-category", "audio" if kind == "audio" else "general").strip().lower()
+    if category not in {"general", "scene", "character", "audio", "effect"}:
+        category = "general"
+    async with session_factory() as session:
+        session.add(RoomAssetModel(asset_id=asset_id, room_id=room_id, owner_user_id=account.user_id, name=asset_name, kind=kind, category=category, url=f"/uploads/{filename}", content_type=content_type, size=len(content)))
+        await session.commit()
+    logger.info("room_asset_uploaded room_id=%s user_id=%s asset_id=%s kind=%s filename=%s", room_id, account.user_id, asset_id, kind, filename)
+    return {"asset_id": asset_id, "name": asset_name, "kind": kind, "category": category, "url": f"/uploads/{filename}", "content_type": content_type}
+
+
+@app.get("/api/rooms/{room_id}/assets")
+async def list_room_assets(room_id: str, authorization: str | None = Header(default=None)) -> dict[str, list[dict[str, object]]]:
+    account = require_account(authorization)
+    async with session_factory() as session:
+        if await room_repository.get_member(session, room_id, account.user_id) is None:
+            raise HTTPException(status_code=403, detail="room_membership_required")
+        assets = list(await session.scalars(select(RoomAssetModel).where(RoomAssetModel.room_id == room_id).order_by(RoomAssetModel.created_at.desc())))
+    return {"assets": [{"asset_id": asset.asset_id, "name": asset.name, "kind": asset.kind, "category": asset.category, "url": asset.url, "content_type": asset.content_type, "size": asset.size, "created_at": asset.created_at.isoformat() if asset.created_at else None} for asset in assets]}
 
 
 @app.websocket("/ws/rooms/{room_id}")
@@ -794,6 +826,9 @@ async def room_socket(websocket: WebSocket, room_id: str) -> None:
             if payload.get("type") == "scene.create":
                 await handle_scene_create(websocket, room_id, member, payload)
                 continue
+            if payload.get("type") == "scene.update":
+                await handle_scene_update(websocket, room_id, member, payload)
+                continue
             if payload.get("type") == "scene.activate":
                 await handle_scene_activate(websocket, room_id, member, payload)
                 continue
@@ -868,10 +903,10 @@ async def room_socket(websocket: WebSocket, room_id: str) -> None:
                 if target is None:
                     await websocket.send_json({"type": "error", "code": "character_check_target_missing"})
                     continue
-                result = roll_dice("1d100")
+                result = roll_coc_percentile(message.roll_mode)
                 check = resolve_check(target, result.total)
-                await room_manager.broadcast(room_id, {"type": "dice.result", "result": {"roll_id": str(uuid4()), "user_id": member.user_id, "display_name": member.display_name, "tab_id": chat_tab.tab_id if chat_tab else None, "expression": f"cc<={target} {target_name}", "rolls": list(result.rolls), "modifier": 0, "total": result.total, "target": target, "level": check.level}})
-                logger.info("coc_check_broadcast room_id=%s user_id=%s target_name=%s target=%s roll=%s level=%s", room_id, user_id, target_name, target, result.total, check.level)
+                await room_manager.broadcast(room_id, {"type": "dice.result", "result": {"roll_id": str(uuid4()), "user_id": member.user_id, "display_name": member.display_name, "tab_id": chat_tab.tab_id if chat_tab else None, "expression": f"cc<={target} {target_name}", "rolls": [result.total], "modifier": 0, "total": result.total, "target": target, "level": check.level, "roll_mode": result.mode, "tens_rolls": list(result.tens_rolls), "units": result.units}})
+                logger.info("coc_check_broadcast room_id=%s user_id=%s target_name=%s target=%s roll=%s level=%s mode=%s", room_id, user_id, target_name, target, result.total, check.level, result.mode)
                 continue
             visible_text = message.text
             owned_token = next((token for token in room_manager.board_tokens(room_id) if token.owner_user_id == member.user_id and token.token_id == message.token_id), None)
@@ -941,6 +976,7 @@ def scene_from_model(scene: object) -> RoomScene:
         scene_id=scene.scene_id,
         name=scene.name,
         background_url=scene.background_url,
+        background_blur=getattr(scene, "background_blur", 0.0),
         is_active=scene.is_active,
     )
 
@@ -1096,8 +1132,19 @@ async def handle_token_upsert(
                     await websocket.send_json({"type": "error", "code": "character_not_found"})
                     return
                 if not await character_repository.activate_room_character(session, room_id, member.user_id, token_input.character_id):
-                    await websocket.send_json({"type": "error", "code": "character_not_loaded_in_room"})
-                    return
+                    library_character = await character_repository.get_library(session, token_input.character_id, member.user_id)
+                    if library_character is None:
+                        await websocket.send_json({"type": "error", "code": "character_not_found"})
+                        return
+                    await character_repository.add_room_character(session, RoomCharacterModel(
+                        room_character_id=str(uuid4()),
+                        room_id=room_id,
+                        character_id=library_character.character_id,
+                        user_id=member.user_id,
+                        sheet_data=library_character.sheet_data,
+                        active=True,
+                    ))
+                    logger.info("room_character_auto_loaded room_id=%s user_id=%s character_id=%s", room_id, member.user_id, token_input.character_id)
             await board_repository.upsert(session, room_id, token)
     except SQLAlchemyError:
         await websocket.send_json({"type": "error", "code": "board_persistence_failed"})
@@ -1356,6 +1403,7 @@ async def handle_scene_create(
                 room_id,
                 request.name.strip(),
                 request.background_url,
+                request.background_blur,
             )
     except SQLAlchemyError:
         logger.exception("scene_creation_failed room_id=%s user_id=%s", room_id, actor.user_id)
@@ -1363,7 +1411,7 @@ async def handle_scene_create(
         return
     scene = room_manager.activate_scene(room_id, scene_model.scene_id)
     if scene is None:
-        scene = RoomScene(scene_model.scene_id, scene_model.name, scene_model.background_url, True)
+        scene = RoomScene(scene_model.scene_id, scene_model.name, scene_model.background_url, True, scene_model.background_blur)
         room_manager.upsert_scene(room_id, scene)
     await room_manager.broadcast(room_id, {"type": "scene.updated", "scene": scene.to_payload()})
     logger.info("scene_created room_id=%s user_id=%s scene_id=%s", room_id, actor.user_id, scene.scene_id)
@@ -1399,6 +1447,36 @@ async def handle_scene_activate(
         room_manager.upsert_scene(room_id, scene)
     await room_manager.broadcast(room_id, {"type": "scene.activated", "scene": scene.to_payload(), "layers": [layer.to_payload() for layer in room_manager.scene_layers(scene.scene_id)]})
     logger.info("scene_activated room_id=%s user_id=%s scene_id=%s", room_id, actor.user_id, scene.scene_id)
+
+
+async def handle_scene_update(
+    websocket: WebSocket,
+    room_id: str,
+    actor: RoomMember,
+    payload: dict[str, object],
+) -> None:
+    if actor.role != "gm":
+        await websocket.send_json({"type": "error", "code": "scene_management_forbidden"})
+        return
+    try:
+        request = SceneUpdateRequest.model_validate(payload)
+    except ValidationError:
+        await websocket.send_json({"type": "error", "code": "invalid_scene"})
+        return
+    try:
+        async with session_factory() as session:
+            scene_model = await scene_repository.update_background(session, room_id, request)
+    except SQLAlchemyError:
+        logger.exception("scene_update_failed room_id=%s user_id=%s scene_id=%s", room_id, actor.user_id, request.scene_id)
+        await websocket.send_json({"type": "error", "code": "scene_persistence_failed"})
+        return
+    if scene_model is None:
+        await websocket.send_json({"type": "error", "code": "scene_not_found"})
+        return
+    scene = scene_from_model(scene_model)
+    room_manager.upsert_scene(room_id, scene)
+    await room_manager.broadcast(room_id, {"type": "scene.updated", "scene": scene.to_payload()})
+    logger.info("scene_updated room_id=%s user_id=%s scene_id=%s blur=%s", room_id, actor.user_id, scene.scene_id, scene.background_blur)
 
 
 async def handle_scene_layer_upsert(

@@ -23,6 +23,7 @@ class SceneRepository:
         room_id: str,
         name: str,
         background_url: str,
+        background_blur: float = 0.0,
     ) -> RoomSceneModel:
         await session.execute(update(RoomSceneModel).where(RoomSceneModel.room_id == room_id).values(is_active=False))
         scene = RoomSceneModel(
@@ -30,6 +31,7 @@ class SceneRepository:
             room_id=room_id,
             name=name,
             background_url=background_url,
+            background_blur=background_blur,
             is_active=True,
         )
         session.add(scene)
@@ -42,5 +44,14 @@ class SceneRepository:
             return None
         await session.execute(update(RoomSceneModel).where(RoomSceneModel.room_id == room_id).values(is_active=False))
         scene.is_active = True
+        await session.commit()
+        return scene
+
+    async def update_background(self, session: AsyncSession, room_id: str, request: object) -> RoomSceneModel | None:
+        scene = await session.get(RoomSceneModel, request.scene_id)
+        if scene is None or scene.room_id != room_id:
+            return None
+        scene.background_url = request.background_url
+        scene.background_blur = request.background_blur
         await session.commit()
         return scene

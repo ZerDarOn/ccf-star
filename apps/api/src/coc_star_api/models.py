@@ -79,6 +79,7 @@ class RoomSceneModel(Base):
     room_id: Mapped[str] = mapped_column(String(128), index=True)
     name: Mapped[str] = mapped_column(String(120))
     background_url: Mapped[str] = mapped_column(String(2_048), default="")
+    background_blur: Mapped[float] = mapped_column(Float, default=0.0)
     is_active: Mapped[bool] = mapped_column(default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -114,6 +115,21 @@ class RoomBgmModel(Base):
     audio_url: Mapped[str] = mapped_column(String(2_048))
     loop: Mapped[bool] = mapped_column(default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class RoomAssetModel(Base):
+    __tablename__ = "room_assets"
+
+    asset_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    room_id: Mapped[str] = mapped_column(String(128), index=True)
+    owner_user_id: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    kind: Mapped[str] = mapped_column(String(20), index=True)
+    category: Mapped[str] = mapped_column(String(40), default="general", index=True)
+    url: Mapped[str] = mapped_column(String(2_048))
+    content_type: Mapped[str] = mapped_column(String(120))
+    size: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
 
 
 class UserModel(Base):

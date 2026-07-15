@@ -20,6 +20,7 @@ export interface ChatMessage {
   tab_id?: string | null;
   show_dialogue?: boolean;
   ai_avatar_url?: string | null;
+  roll_mode?: "normal" | "bonus" | "penalty";
 }
 
 export interface ChatTab {
@@ -65,6 +66,7 @@ export interface RoomScene {
   scene_id: string;
   name: string;
   background_url: string;
+  background_blur: number;
   is_active: boolean;
 }
 

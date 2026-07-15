@@ -41,3 +41,18 @@ def test_coc7_derived_stats_and_damage_bonus() -> None:
 )
 def test_resolve_coc7_check_levels(target: int, roll: int, level: str) -> None:
     assert resolve_check(target, roll).level == level
+
+
+def test_check_target_accepts_common_synonyms() -> None:
+    from coc_star_api.coc7_rules import canonical_check_target
+
+    assert canonical_check_target("\u4fa6\u5bdf") == ("skill", "spot_hidden")
+    assert canonical_check_target("\u89c2\u5bdf\u529b") == ("skill", "spot_hidden")
+
+
+def test_check_target_accepts_common_synonyms_and_spacing() -> None:
+    from coc_star_api.coc7_rules import canonical_check_target
+
+    assert canonical_check_target("侦察") == ("skill", "spot_hidden")
+    assert canonical_check_target("观察力") == ("skill", "spot_hidden")
+    assert canonical_check_target("  侦 查  ") == ("skill", "spot_hidden")
